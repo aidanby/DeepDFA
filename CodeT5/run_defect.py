@@ -28,6 +28,7 @@ import numpy as np
 from io import open
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from tqdm import tqdm
+import sys
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler, TensorDataset
@@ -159,11 +160,14 @@ def main():
 
     ### ON MY FLOWGNN SHID
     if args.flowgnn_data:
-        logger.info("ACTIVATING FLOWGNN DATA")
         import sys
-        sys.path.append("/home/DeepDFA/DDFA/code_gnn/linevd-code_gnn/linevd")
+        logger.info("ACTIVATING FLOWGNN DATA")
+        #sys.path.append("/home/DeepDFA/DDFA/code_gnn/linevd-code_gnn/linevd")
+        sys.path.append("/home/DeepDFA/DDFA/")
+
         from code_gnn.models.flow_gnn.ggnn import FlowGNNGGNNModule
-        from sastvd.linevd import BigVulDatasetLineVDDataModule
+        
+        from sastvd.linevd.datamodule import BigVulDatasetLineVDDataModule
         # load graphs
         feat = "_ABS_DATAFLOW_datatype_all_limitall_1000_limitsubkeys_1000"
         gtype = "cfg"
@@ -180,7 +184,7 @@ def main():
             dsname,
             undersample=None,
             oversample=None,
-            filter_cwe="",
+            # filter_cwe="",
             sample=-1,
             sample_mode=False,
             train_workers=1,
@@ -196,7 +200,7 @@ def main():
             # codebert_feat=None,
             # doc2vec_feat=None,
             # glove_feat=None,
-            node_type_feat=node_type_feat,
+            # node_type_feat=node_type_feat,
             concat_all_absdf=concat_all_absdf,
             # use_weighted_loss=False,
             # use_random_weighted_sampler=False,
