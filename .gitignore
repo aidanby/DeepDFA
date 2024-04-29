@@ -2,3 +2,7 @@ LineVul/data/
 ./models/
 ./logs/
 README.artifact-evaluation.md
+joern/*
+__pycache__/
+*.py[cod]
+*.zip

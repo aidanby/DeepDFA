@@ -1,4 +1,4 @@
-WORKDIR="/home/<ANON>/code/ddfa/CodeT5"
+WORKDIR="/DeepDFA/ddfa/CodeT5"
 export PYTHONPATH=$WORKDIR
 
 TASK=${1}

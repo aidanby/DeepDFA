@@ -161,7 +161,7 @@ def main():
     if args.flowgnn_data:
         logger.info("ACTIVATING FLOWGNN DATA")
         import sys
-        sys.path.append("/home/<ANON>/code/ddfa/code_gnn/linevd-code_gnn/linevd")
+        sys.path.append("/home/DeepDFA/DDFA/code_gnn/linevd-code_gnn/linevd")
         from code_gnn.models.flow_gnn.ggnn import FlowGNNGGNNModule
         from sastvd.linevd import BigVulDatasetLineVDDataModule
         # load graphs
@@ -211,7 +211,7 @@ def main():
     # load model
     if args.flowgnn_model:
         import sys
-        sys.path.append("/home/<ANON>/code/ddfa/code_gnn/linevd-code_gnn/linevd")
+        sys.path.append("/home/DeepDFA/DDFA/code_gnn/linevd-code_gnn/linevd")
         from code_gnn.models.flow_gnn.ggnn import FlowGNNGGNNModule
         from sastvd.linevd import BigVulDatasetLineVDDataModule
         logger.info("ACTIVATING FLOWGNN MODEL")
