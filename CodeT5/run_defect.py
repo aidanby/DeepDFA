@@ -60,6 +60,8 @@ import multiprocessing
 import time
 
 from models import DefectModel
+from hf_inference import PeftInference
+
 from configs import add_args, set_seed
 from utils import get_filenames, get_elapse_time, load_and_cache_defect_data
 from models import get_model_size
@@ -193,15 +195,16 @@ def main():
 
     # Build model
     if args.model_type == "codellama":
-        model_id = "codellama/CodeLlama-7b-hf"
-        # quantization_config = BitsAndBytesConfig(
-        #     load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16
-        # )
+        model_id = "codellama/CodeLlama-7b-Instruct-hf"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             device_map="auto",
         )
+        config = model.config
+    elif args.model_type == "finetuned":
+        peft_inference = PeftInference("codellama/CodeLlama-7b-Instruct-hf", "/home/checkpoints_codellama7/step_1200")
+        model, tokenizer = peft_inference.load_model()
         config = model.config
     else:
         config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
