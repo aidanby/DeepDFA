@@ -52,6 +52,9 @@ from transformers import (
     T5Config,
     T5ForConditionalGeneration,
     T5Tokenizer,
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    # BitsAndBytesConfig,
 )
 import multiprocessing
 import time
@@ -189,16 +192,30 @@ def main():
     set_seed(args)
 
     # Build model
-    config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
-    config = config_class.from_pretrained(
-        args.config_name if args.config_name else args.model_name_or_path
-    )
-    model = model_class.from_pretrained(args.model_name_or_path)
-    tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name)
-
+    if args.model_type == "codellama":
+        model_id = "codellama/CodeLlama-7b-hf"
+        # quantization_config = BitsAndBytesConfig(
+        #     load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16
+        # )
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            device_map="auto",
+        )
+        config = model.config
+    else:
+        config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
+        config = config_class.from_pretrained(
+            args.config_name if args.config_name else args.model_name_or_path
+        )
+        model = model_class.from_pretrained(args.model_name_or_path)
+        tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name)
+        
+        
     sys.path.append("/home/DeepDFA/DDFA/")
     from code_gnn.models.flow_gnn.ggnn import FlowGNNGGNNModule
     from sastvd.linevd.datamodule import BigVulDatasetLineVDDataModule
+
 
     ### ON MY FLOWGNN SHID
     if args.flowgnn_data:
