@@ -588,4 +588,6 @@ def main():
 
 
 if __name__ == "__main__":
+    os.environ['NCCL_DEBUG'] = 'INFO'
+    # os.environ['NCCL_IB_DISABLE'] = '1'
     main()
