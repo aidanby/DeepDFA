@@ -90,6 +90,7 @@ def load_model_tokenizer(
         torch_dtype=torch_dtype,
         trust_remote_code=True,
         low_cpu_mem_usage=True,
+        output_hidden_states=True,
     )
 
     if peft_path:

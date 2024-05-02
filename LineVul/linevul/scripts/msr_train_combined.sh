@@ -15,7 +15,7 @@ python3 linevul_main.py \
   --model_type=llama \
   --tokenizer_name=codellama/CodeLlama-7b-Instruct-hf \
   --model_name_or_path=codellama/CodeLlama-7b-Instruct-hf \
-  --finetuned_path=/home/checkpoints_codellama7/step_1200 \
+  --finetuned_path=../finetune_checkpoints/checkpoints_codellama7/step_6000 \
   --do_train \
   --do_test \
   --train_data_file=../data/$dataset/train.csv \
@@ -23,8 +23,8 @@ python3 linevul_main.py \
   --test_data_file=../data/$dataset/test.csv \
   --epochs 10 \
   --block_size 512 \
-  --train_batch_size 16 \
-  --eval_batch_size 16 \
+  --train_batch_size 4 \
+  --eval_batch_size 4 \
   --learning_rate 2e-5 \
   --max_grad_norm 1.0 \
   --evaluate_during_training \

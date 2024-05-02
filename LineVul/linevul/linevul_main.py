@@ -37,11 +37,9 @@ from transformers import (
 )
 
 from tqdm import tqdm
-from linevul_model import BertModel, HfModel
+from linevul_model import LLMModel, GNNModel
 import pandas as pd
-
-# from accelerate import load_checkpoint_and_dispatch, init_empty_weights
-# from huggingface_hub import snapshot_download
+# from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 
 
 # metrics
@@ -97,8 +95,8 @@ class TextDataset(Dataset):
         if "holdout" in os.path.basename(file_path):
             df["split"].replace("holdout", "test")
 
-        if args.sample:
-            df = df.sample(100)
+        # if args.sample:
+        df = df.sample(100)
 
         if "processed_func" in df.columns:
             func_key = "processed_func"
@@ -183,14 +181,14 @@ def convert_examples_to_features(func, label, tokenizer, args, i):
         # Setting pad token as eos token similarly to GPT-2 training
         tokenizer.pad_token = tokenizer.eos_token
         source_tokens = tokenizer.tokenize(str(func))
-        source_tokens = source_tokens[:512]
+        source_tokens = source_tokens[: args.block_size]
         source_ids = tokenizer(
             str(func),
             return_tensors="pt",
             padding="max_length",
             truncation=True,
             max_length=args.block_size,
-        )["input_ids"].to("cuda")
+        )["input_ids"].to(args.device)
     return InputFeatures(source_tokens, source_ids, label, i)
 
 
@@ -203,7 +201,15 @@ def set_seed(args):
     dgl.seed(args.seed)
 
 
-def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
+def train(
+    args,
+    train_dataset,
+    hf_model,
+    gnn_model,
+    tokenizer,
+    eval_dataset,
+    flowgnn_dataset,
+):
     """Train the model"""
     # build dataloader
     train_sampler = RandomSampler(train_dataset)
@@ -218,7 +224,6 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
     # evaluate the model per epoch
     args.save_steps = len(train_dataloader)
     args.warmup_steps = args.max_steps // 5
-    model.to(args.device)
 
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ["bias", "LayerNorm.weight"]
@@ -226,7 +231,7 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
         {
             "params": [
                 p
-                for n, p in model.named_parameters()
+                for n, p in gnn_model.named_parameters()
                 if not any(nd in n for nd in no_decay)
             ],
             "weight_decay": args.weight_decay,
@@ -234,7 +239,7 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
         {
             "params": [
                 p
-                for n, p in model.named_parameters()
+                for n, p in gnn_model.named_parameters()
                 if any(nd in n for nd in no_decay)
             ],
             "weight_decay": 0.0,
@@ -246,11 +251,10 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps
     )
-
+    gnn_model.to(args.device)
     # multi-gpu training
     if args.n_gpu > 1:
-        model = torch.nn.DataParallel(model)
-
+        gnn_model = torch.nn.DataParallel(gnn_model)
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
@@ -269,17 +273,15 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
     global_step = 0
     tr_loss, logging_loss, avg_loss, tr_nb, tr_num, train_loss = 0.0, 0.0, 0.0, 0, 0, 0
     best_f1 = 0
-
-    model.zero_grad()
-
+    gnn_model.zero_grad()
     num_missing = 0
-
     for idx in range(args.epochs):
         bar = tqdm(train_dataloader, total=len(train_dataloader))
         tr_num = 0
         train_loss = 0
         for step, batch in enumerate(bar):
             (inputs_ids, labels, index) = [x.to(args.device) for x in batch]
+
             if flowgnn_dataset is None:
                 graphs = None
             else:
@@ -287,15 +289,31 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
                 num_missing += len(labels) - len(keep_idx)
                 inputs_ids = inputs_ids[keep_idx]
                 labels = labels[keep_idx]
-            model.train()
-            loss, logits = model(input_ids=inputs_ids, labels=labels, graphs=graphs)
+                graphs.to(args.device)
+            gnn_model.train()
+
+            # Receive LLM final hidden states and send to device (default cuda:0)
+            llm_hidden_states, llm_attentions = hf_model(input_ids=inputs_ids)
+            llm_hidden_states.to(args.device)
+            if llm_attentions is not None:
+                llm_attentions.to(args.device)
+            # GNN model forward pass
+            loss, logits = gnn_model(
+                labels=labels,
+                graphs=graphs,
+                llm_hidden_states=llm_hidden_states,
+                llm_attentions=llm_attentions,
+            )
+
             if args.n_gpu > 1:
                 loss = loss.mean()
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(
+                gnn_model.parameters(), args.max_grad_norm
+            )
 
             tr_loss += loss.item()
             tr_num += 1
@@ -319,7 +337,7 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
                 if global_step % args.save_steps == 0:
                     results = evaluate(
                         args,
-                        model,
+                        gnn_model,
                         tokenizer,
                         eval_dataset,
                         flowgnn_dataset,
@@ -340,7 +358,9 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
                         if not os.path.exists(output_dir):
                             os.makedirs(output_dir)
                         model_to_save = (
-                            model.module if hasattr(model, "module") else model
+                            gnn_model.module
+                            if hasattr(gnn_model, "module")
+                            else gnn_model
                         )
                         output_dir = os.path.join(
                             output_dir, "{}".format(args.model_name)
@@ -352,7 +372,11 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
         output_dir = os.path.join(args.output_dir, "{}".format(checkpoint_prefix))
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
-        model_to_save = model.module if hasattr(model, "module") else model
+        model_to_save = (
+            gnn_model.module
+            if hasattr(gnn_model, "module")
+            else gnn_model
+        )
         output_dir = os.path.join(output_dir, "{}".format(args.model_name))
         torch.save(model_to_save.state_dict(), output_dir)
         logger.info("Saving model checkpoint to %s", output_dir)
@@ -387,6 +411,7 @@ def evaluate(
     y_trues = []
     for batch in tqdm(eval_dataloader, desc="evaluate eval"):
         (inputs_ids, labels, index) = [x.to(args.device) for x in batch]
+
         if flowgnn_dataset is None:
             graphs = None
         else:
@@ -472,6 +497,7 @@ def test(
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
         (inputs_ids, labels, index) = [x.to(args.device) for x in batch]
+
         if flowgnn_dataset is None:
             graphs = None
         else:
@@ -809,7 +835,7 @@ def main():
 
     # Setup CUDA, GPU
     device = torch.device(
-        "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
+        "cuda:0" if torch.cuda.is_available() and not args.no_cuda else "cpu"
     )
     args.n_gpu = torch.cuda.device_count()
     args.device = device
@@ -840,6 +866,8 @@ def main():
         )
     else:
         tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+        tokenizer.padding_side = "left"
+
     if args.use_finetuned_model:
         logger.info(f"Loading finetuned model from {args.model_name_or_path} ")
         peft_inference = PeftInference(
@@ -847,34 +875,48 @@ def main():
             args.finetuned_path,
         )
         llm_model, tokenizer = peft_inference.load_model()
-        config = llm_model.config
-        config.num_labels = 1
-        config.num_attention_heads = args.num_attention_heads
+
     else:
         logger.info(f"Loading pretrained model from {args.model_name_or_path} ")
         bnb_config = BitsAndBytesConfig(
-            load_in_8bit=True,
+            load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.float16,
         )
         if args.use_non_pretrained_model:
             llm_model = AutoModelForCausalLM(
-                device_map="auto",
+                args.model_name_or_path,
                 torch_dtype=torch.float16,
                 quantization_config=bnb_config,
+                output_hidden_states=True,
+                device_map="auto",
             )
         else:
             llm_model = AutoModelForCausalLM.from_pretrained(
                 args.model_name_or_path,
-                ignore_mismatched_sizes=True,
                 torch_dtype=torch.float16,
                 quantization_config=bnb_config,
+                output_hidden_states=True,
                 device_map="auto",
             )
-            llm_model.tie_weights()
-        config = llm_model.config
-        config.num_labels = 1
-        config.num_attention_heads = args.num_attention_heads
+
+    # Set manual config options
+    config = llm_model.config
+    config.num_labels = 1
+    config.num_attention_heads = args.num_attention_heads
+
+    # PEFT and Lora configs (fractional trainable parameters)
+    # peft_config = LoraConfig(
+    #     inference_mode=False,
+    #     task_type="CAUSAL_LM",
+    #     r=8,
+    #     lora_alpha=32,
+    #     lora_dropout=0.1,
+    # )
+    # llm_model.gradient_checkpointing_enable()
+    # llm_model = prepare_model_for_kbit_training(llm_model)
+    # llm_model = get_peft_model(llm_model, peft_config)
+    # llm_model.print_trainable_parameters()
 
     # load all graphs
     if args.really_no_flowgnn:
@@ -942,10 +984,15 @@ def main():
         logger.info("FlowGNN output dim: %d", flowgnn_model.out_dim)
 
     # Combined model
-    if "bert" in args.model_type:
-        model = BertModel(llm_model, flowgnn_model, config, tokenizer, args)
-    else:
-        model = HfModel(llm_model, flowgnn_model, config, tokenizer, args)
+    if flowgnn_model:
+        if args.n_gpu > 1:
+            flowgnn_model = torch.nn.DataParallel(flowgnn_model)
+            flowgnn_model = flowgnn_model.module
+        else:
+            flowgnn_model.to(args.device)
+
+    llm_model = LLMModel(llm_model, flowgnn_model, config, tokenizer, args)
+    gnn_model = GNNModel(flowgnn_model, config, args)
 
     # print number of params
     def count_params(model):
@@ -953,14 +1000,14 @@ def main():
             return 0
         return sum(p.numel() for p in model.parameters())
 
-    params = count_params(model.encoder) + count_params(model.classifier)
+    params = count_params(llm_model.encoder) + count_params(llm_model.classifier)
     if not args.no_flowgnn:
-        params += count_params(model.flowgnn_encoder)
+        params += count_params(llm_model.flowgnn_encoder)
     print("parameters:", params)
-    print("encoder:", model.encoder)
-    print("classifier:", model.classifier)
+    print("encoder:", llm_model.encoder)
+    print("classifier:", llm_model.classifier)
     if not args.no_flowgnn:
-        print("flowgnn_encoder:", model.flowgnn_encoder)
+        print("flowgnn_encoder:", llm_model.flowgnn_encoder)
 
     # Training
     if args.do_train:
@@ -968,15 +1015,23 @@ def main():
             tokenizer, args, file_type="train", return_index=True
         )
         eval_dataset = TextDataset(tokenizer, args, file_type="eval", return_index=True)
-        train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset)
+        train(
+            args,
+            train_dataset,
+            llm_model,
+            gnn_model,
+            tokenizer,
+            eval_dataset,
+            flowgnn_dataset,
+        )
     # Evaluation
     if args.do_eval:
         output_dir = os.path.join(
             args.output_dir, args.model_name, "checkpoint-best-f1", "model.bin"
         )
-        model.load_state_dict(torch.load(output_dir))
-        model.to(args.device)
-        evaluate(args, model, tokenizer)
+        gnn_model.load_state_dict(torch.load(output_dir))
+        gnn_model.to(args.device)
+        evaluate(args, gnn_model, tokenizer)
     # Test
     if args.do_test:
         if os.path.exists(args.model_name):
@@ -997,12 +1052,12 @@ def main():
                 output_dir = os.path.join(
                     args.output_dir, args.model_name, "checkpoint-best-f1", "model.bin"
                 )
-        model.load_state_dict(torch.load(output_dir, map_location=args.device))
-        model.to(args.device)
+        gnn_model.load_state_dict(torch.load(output_dir, map_location=args.device))
+        gnn_model.to(args.device)
         test_dataset = TextDataset(tokenizer, args, file_type="test", return_index=True)
         test(
             args,
-            model,
+            gnn_model,
             tokenizer,
             test_dataset,
             flowgnn_dataset,

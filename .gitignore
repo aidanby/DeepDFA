@@ -6,3 +6,4 @@ joern/*
 __pycache__/
 *.py[cod]
 *.zip
+LineVul/finetune_checkpoints/
