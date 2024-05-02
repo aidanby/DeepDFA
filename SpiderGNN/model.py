@@ -24,14 +24,14 @@ class SpiderGNN(nn.Module):
     ):
         # Encode each function using a transformer
         # Transformer encoding for each function
-        input_ids = graph.ndata["attr"]
-        input_ids = input_ids.int() # NOTE: For DEBUG ONLY with dummy data
+        input_ids = graph.ndata["input_ids"]
+        attention_mask = graph.ndata["attention_mask"]
         hf_out_node = self.encoder(
             input_ids,
-            attention_mask=input_ids.ne(1),
+            attention_mask=attention_mask,
         )[0]
         hf_out_node = hf_out_node[:,-1,:] # TODO: Extract a single representation for each sentence. [CLS]?
-            
+
         # Use GNN to aggregate encodings among functions
         gnn_nodes = self.gnn(graph, hf_out_node)
         gnn_graph = self.gnn_readout(graph, gnn_nodes)

@@ -12,27 +12,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from pathlib import Path
-from linevul.util import load_model
-from model import SpiderGNN
 import numpy as np
 
 import sys
 sys.path.append(str(Path(__file__).parent.parent/"LineVul"))
 sys.path.append(str(Path(__file__).parent.parent))
+from linevul.util import load_model
+from model import SpiderGNN
 
 ##### LOAD DATASET
-
-# Generate a synthetic dataset with 10000 graphs, ranging from 10 to 500 nodes.
-dataset = dgl.data.GINDataset("PROTEINS", self_loop=True)
-# TODO: Load instead a dataset of programs where each node is a function with tokenized text as "input_ids"
-
-print("Node feature dimensionality:", dataset.dim_nfeats)
-print("Number of graph categories:", dataset.gclasses)
 
 
 from dgl.dataloading import GraphDataLoader
 
 from torch.utils.data.sampler import SubsetRandomSampler
+
+from dataset import CallGraphDataset
+
+dataset = CallGraphDataset()
 
 num_examples = len(dataset)
 num_train = int(num_examples * 0.8)
@@ -80,7 +77,7 @@ optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 for epoch in range(50):
     losses = []
     for batched_graph, labels in train_dataloader:
-        pred = model(batched_graph, batched_graph.ndata["attr"].float())
+        pred = model(batched_graph, labels)
         loss = F.cross_entropy(pred, labels)
         optimizer.zero_grad()
         loss.backward()
