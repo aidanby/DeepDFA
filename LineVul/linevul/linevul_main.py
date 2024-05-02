@@ -33,11 +33,16 @@ from transformers import (
     AutoConfig,
     AutoTokenizer,
     AutoModelForCausalLM,
+    BitsAndBytesConfig,
 )
 
 from tqdm import tqdm
 from linevul_model import BertModel, HfModel
 import pandas as pd
+
+# from accelerate import load_checkpoint_and_dispatch, init_empty_weights
+# from huggingface_hub import snapshot_download
+
 
 # metrics
 from sklearn.metrics import (
@@ -178,10 +183,12 @@ def convert_examples_to_features(func, label, tokenizer, args, i):
         # Setting pad token as eos token similarly to GPT-2 training
         tokenizer.pad_token = tokenizer.eos_token
         source_tokens = tokenizer.tokenize(str(func))
+        source_tokens = source_tokens[:512]
         source_ids = tokenizer(
             str(func),
             return_tensors="pt",
             padding="max_length",
+            truncation=True,
             max_length=args.block_size,
         )["input_ids"].to("cuda")
     return InputFeatures(source_tokens, source_ids, label, i)
@@ -211,7 +218,7 @@ def train(args, train_dataset, model, tokenizer, eval_dataset, flowgnn_dataset):
     # evaluate the model per epoch
     args.save_steps = len(train_dataloader)
     args.warmup_steps = args.max_steps // 5
-    # model.to(args.device)
+    model.to(args.device)
 
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ["bias", "LayerNorm.weight"]
@@ -845,23 +852,29 @@ def main():
         config.num_attention_heads = args.num_attention_heads
     else:
         logger.info(f"Loading pretrained model from {args.model_name_or_path} ")
-        config = AutoConfig.from_pretrained(
-            args.config_name if args.config_name else args.model_name_or_path
+        bnb_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
         )
-        config.num_labels = 1
-        config.num_attention_heads = args.num_attention_heads
         if args.use_non_pretrained_model:
             llm_model = AutoModelForCausalLM(
-                config=config,
                 device_map="auto",
+                torch_dtype=torch.float16,
+                quantization_config=bnb_config,
             )
         else:
             llm_model = AutoModelForCausalLM.from_pretrained(
                 args.model_name_or_path,
-                config=config,
                 ignore_mismatched_sizes=True,
+                torch_dtype=torch.float16,
+                quantization_config=bnb_config,
                 device_map="auto",
             )
+            llm_model.tie_weights()
+        config = llm_model.config
+        config.num_labels = 1
+        config.num_attention_heads = args.num_attention_heads
 
     # load all graphs
     if args.really_no_flowgnn:
@@ -962,7 +975,7 @@ def main():
             args.output_dir, args.model_name, "checkpoint-best-f1", "model.bin"
         )
         model.load_state_dict(torch.load(output_dir))
-        # model.to(args.device)
+        model.to(args.device)
         evaluate(args, model, tokenizer)
     # Test
     if args.do_test:
@@ -985,7 +998,7 @@ def main():
                     args.output_dir, args.model_name, "checkpoint-best-f1", "model.bin"
                 )
         model.load_state_dict(torch.load(output_dir, map_location=args.device))
-        # model.to(args.device)
+        model.to(args.device)
         test_dataset = TextDataset(tokenizer, args, file_type="test", return_index=True)
         test(
             args,

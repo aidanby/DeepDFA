@@ -165,6 +165,9 @@ class HfModel(LlamaForSequenceClassification):
                 return prob, attentions
         else:
             if input_ids is not None:
+                print(f"Initial shape {input_ids.shape}")
+                input_ids = input_ids[:, -1, :]
+                print(f"Final shape {input_ids.shape}")
                 outputs = self.encoder(
                     input_ids,
                     attention_mask=input_ids.ne(1),

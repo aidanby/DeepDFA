@@ -28,6 +28,4 @@ python3 linevul_main.py \
   --learning_rate 2e-5 \
   --max_grad_norm 1.0 \
   --evaluate_during_training \
-  --really_no_flowgnn \
-  --no_flowgnn \
   --seed $seed $@ 2>&1 | tee "train_${dataset}_${seed}.log"
