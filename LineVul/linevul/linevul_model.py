@@ -13,14 +13,17 @@ class ClassificationHead(nn.Module):
 
     def __init__(self, config, extra_dim):
         super().__init__()
-        # TODO: add dim on just dense or both?
         self.dense = nn.Linear(config.hidden_size + extra_dim, config.hidden_size)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.dropout = nn.Dropout(config.attention_dropout)
         self.out_proj = nn.Linear(config.hidden_size, 2)
 
     def forward(self, features, flowgnn_embed, **kwargs):
+        # number examples x number tokens x hidden states length
         x = features[:, 0, :]  # take <s> token (equiv. to [CLS])
         if flowgnn_embed is not None:
+            print(f"flowgnn_embed shape: {flowgnn_embed.shape}")
+            print(f"x shape: {x.shape}")
+            # Force dimension 1 to be the same for x and flow_gnn_embed
             x = torch.cat((x, flowgnn_embed), dim=1)
         x = self.dropout(x)
         x = self.dense(x)
@@ -79,6 +82,7 @@ class LLMModel(LlamaForSequenceClassification):
                 outputs = self.encoder(
                     inputs_embeds=input_embed, output_attentions=output_attentions
                 )[0]
+                print(f"final llm outputs shape: {outputs.shape}")
             return outputs, None
 
 
@@ -110,6 +114,8 @@ class GNNModel(LlamaForSequenceClassification):
             )
             print(f"llm_hidden_states shape: {llm_hidden_states.shape}")
             print(f"flowgnn_embed shape: {flowgnn_embed.shape}")
+            # llm_hidden_staters = output
+            # number of nodes x hidden states of gnn
 
             logits = self.classifier(llm_hidden_states, flowgnn_embed)
             prob = torch.softmax(logits, dim=-1)

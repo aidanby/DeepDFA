@@ -33,12 +33,14 @@ from transformers import (
     AutoConfig,
     AutoTokenizer,
     AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
     BitsAndBytesConfig,
 )
 
 from tqdm import tqdm
 from linevul_model import LLMModel, GNNModel
 import pandas as pd
+
 # from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 
 
@@ -168,27 +170,19 @@ def convert_examples_to_features(func, label, tokenizer, args, i):
         source_ids = encoded
         source_tokens = []
         return InputFeatures(source_tokens, source_ids, label, i)
-    # source
-    if args.model_type == "roberta":
-        # Original post processing on Roberta
-        code_tokens = tokenizer.tokenize(str(func))[: args.block_size - 2]
-        source_tokens = [tokenizer.cls_token] + code_tokens + [tokenizer.sep_token]
-        source_ids = tokenizer.convert_tokens_to_ids(source_tokens)
-        padding_length = args.block_size - len(source_ids)
-        source_ids += [tokenizer.pad_token_id] * padding_length
-    else:
-        # Llama tokenizer adds cls and eos tokens automatically, but does not have pad token by default
-        # Setting pad token as eos token similarly to GPT-2 training
-        tokenizer.pad_token = tokenizer.eos_token
-        source_tokens = tokenizer.tokenize(str(func))
-        source_tokens = source_tokens[: args.block_size]
-        source_ids = tokenizer(
-            str(func),
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=args.block_size,
-        )["input_ids"].to(args.device)
+
+    # Llama tokenizer adds cls and eos tokens automatically, but does not have pad token by default
+    # Setting pad token as eos token similarly to GPT-2 training
+    tokenizer.pad_token = tokenizer.eos_token
+    source_tokens = tokenizer.tokenize(str(func))
+    source_tokens = source_tokens[: args.block_size]
+    source_ids = tokenizer(
+        str(func),
+        return_tensors="pt",
+        padding="max_length",
+        truncation=True,
+        max_length=args.block_size,
+    )["input_ids"].to(args.device)
     return InputFeatures(source_tokens, source_ids, label, i)
 
 
@@ -311,9 +305,7 @@ def train(
                 loss = loss / args.gradient_accumulation_steps
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                gnn_model.parameters(), args.max_grad_norm
-            )
+            torch.nn.utils.clip_grad_norm_(gnn_model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
             tr_num += 1
@@ -372,11 +364,7 @@ def train(
         output_dir = os.path.join(args.output_dir, "{}".format(checkpoint_prefix))
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
-        model_to_save = (
-            gnn_model.module
-            if hasattr(gnn_model, "module")
-            else gnn_model
-        )
+        model_to_save = gnn_model.module if hasattr(gnn_model, "module") else gnn_model
         output_dir = os.path.join(output_dir, "{}".format(args.model_name))
         torch.save(model_to_save.state_dict(), output_dir)
         logger.info("Saving model checkpoint to %s", output_dir)
@@ -883,27 +871,18 @@ def main():
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.float16,
         )
-        if args.use_non_pretrained_model:
-            llm_model = AutoModelForCausalLM(
-                args.model_name_or_path,
-                torch_dtype=torch.float16,
-                quantization_config=bnb_config,
-                output_hidden_states=True,
-                device_map="auto",
-            )
-        else:
-            llm_model = AutoModelForCausalLM.from_pretrained(
-                args.model_name_or_path,
-                torch_dtype=torch.float16,
-                quantization_config=bnb_config,
-                output_hidden_states=True,
-                device_map="auto",
-            )
+        llm_model = AutoModelForSequenceClassification.from_pretrained(
+            args.model_name_or_path,
+            torch_dtype=torch.float16,
+            quantization_config=bnb_config,
+            output_hidden_states=True,
+            device_map="auto",
+        )
 
     # Set manual config options
-    config = llm_model.config
-    config.num_labels = 1
-    config.num_attention_heads = args.num_attention_heads
+    llm_model.config.num_labels = 1
+    llm_model.config.num_attention_heads = args.num_attention_heads
+    llm_model.config.pad_token_id = llm_model.model.config.eos_token_id
 
     # PEFT and Lora configs (fractional trainable parameters)
     # peft_config = LoraConfig(
@@ -1000,12 +979,12 @@ def main():
             return 0
         return sum(p.numel() for p in model.parameters())
 
-    params = count_params(llm_model.encoder) + count_params(llm_model.classifier)
+    params = count_params(llm_model.encoder) + count_params(gnn_model.classifier)
     if not args.no_flowgnn:
         params += count_params(llm_model.flowgnn_encoder)
     print("parameters:", params)
     print("encoder:", llm_model.encoder)
-    print("classifier:", llm_model.classifier)
+    print("classifier:", gnn_model.classifier)
     if not args.no_flowgnn:
         print("flowgnn_encoder:", llm_model.flowgnn_encoder)
 
