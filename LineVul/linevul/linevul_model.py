@@ -6,6 +6,7 @@ from transformers import (
     AutoModelForSequenceClassification,
     LlamaForSequenceClassification,
 )
+import gc  # garbage collect library
 
 
 class ClassificationHead(nn.Module):
@@ -47,50 +48,29 @@ class LLMModel(LlamaForSequenceClassification):
         self,
         input_ids=None,
         input_embed=None,
-        output_attentions=False,
     ):
-        if output_attentions:
-            if input_ids is not None:
-                input_ids = input_ids[:, -1, :]
-                self.encoder.eval()
-                outputs = self.encoder(
-                    input_ids,
-                    attention_mask=input_ids.ne(1),
-                    output_attentions=output_attentions,
-                )
-            else:
-                outputs = self.encoder(
-                    inputs_embeds=input_embed, output_attentions=output_attentions
-                )
-            attentions = outputs.attentions
-            last_hidden_state = outputs.last_hidden_state
-            return last_hidden_state, attentions
+        if input_ids is not None:
+            input_ids = input_ids[:, -1, :]
+            self.encoder.eval()
+            attention_mask = input_ids.ne(1)
+            outputs = self.encoder(
+                input_ids,
+                attention_mask=attention_mask,
+            )[0]
         else:
-            if input_ids is not None:
-                input_ids = input_ids[:, -1, :]
-                input_ids = input_ids.to(self.encoder.device)
-                attention_mask = input_ids.ne(1)
-                attention_mask.to(self.encoder.device)
-                print(f"input_ids device: {input_ids.device}")
-                print(f"encoder device: {self.encoder.device}")
-                outputs = self.encoder(
-                    input_ids,
-                    attention_mask=attention_mask,
-                    output_attentions=output_attentions,
-                )[0]
-            else:
-                outputs = self.encoder(
-                    inputs_embeds=input_embed, output_attentions=output_attentions
-                )[0]
-                print(f"final llm outputs shape: {outputs.shape}")
-            return outputs, None
+            outputs = self.encoder(inputs_embeds=input_embed)[0]
+            print(f"final llm outputs shape: {outputs.shape}")
+        last_hidden_state = outputs.last_hidden_state
+        model_object = self.encoder().cuda()
+        del model_object
+        gc.collect()
+        torch.cuda.empty_cache()
+        return last_hidden_state
 
 
-class GNNModel(LlamaForSequenceClassification):
+class GNNModel:
     def __init__(self, flowgnn_encoder, config, args):
-        super(GNNModel, self).__init__(config=config)
-        if not args.no_flowgnn:
-            self.flowgnn_encoder = flowgnn_encoder
+        self.flowgnn_encoder = flowgnn_encoder
         self.classifier = ClassificationHead(
             config, 0 if args.no_flowgnn else self.flowgnn_encoder.out_dim
         )
@@ -101,40 +81,16 @@ class GNNModel(LlamaForSequenceClassification):
         labels=None,
         graphs=None,
         llm_hidden_states=None,
-        llm_attentions=None,
-        output_attentions=False,
     ):
-        if output_attentions and llm_attentions is not None:
-            print(f"llm_hidden_states shape: {llm_hidden_states.shape}")
-            print(f"flowgnn_embed shape: {flowgnn_embed.shape}")
-
-            # reshape llm_hidden_states to match the shape of flowgnn
-            llm_hidden_states = llm_hidden_states.unsqueeze(1).repeat(
-                1, graphs[0].num_nodes, 1
-            )
-            print(f"llm_hidden_states shape: {llm_hidden_states.shape}")
-            print(f"flowgnn_embed shape: {flowgnn_embed.shape}")
-            # llm_hidden_staters = output
-            # number of nodes x hidden states of gnn
-
-            logits = self.classifier(llm_hidden_states, flowgnn_embed)
-            prob = torch.softmax(logits, dim=-1)
-            if labels is not None:
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits, labels)
-                return loss, prob, llm_attentions
-            else:
-                return prob, llm_attentions
+        if self.args.no_flowgnn:
+            flowgnn_embed = None
+        elif graphs is not None:
+            flowgnn_embed = self.flowgnn_encoder(graphs, {})
+        logits = self.classifier(llm_hidden_states, flowgnn_embed)
+        prob = torch.softmax(logits, dim=-1)
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(logits, labels)
+            return loss, prob
         else:
-            if self.args.no_flowgnn:
-                flowgnn_embed = None
-            elif graphs is not None:
-                flowgnn_embed = self.flowgnn_encoder(graphs, {})
-            logits = self.classifier(llm_hidden_states, flowgnn_embed)
-            prob = torch.softmax(logits, dim=-1)
-            if labels is not None:
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits, labels)
-                return loss, prob
-            else:
-                return prob
+            return prob

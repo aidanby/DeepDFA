@@ -25,6 +25,9 @@ import numpy as np
 import torch
 import sys
 import os.path as path
+from tqdm import tqdm
+from linevul_model import LLMModel, GNNModel
+import pandas as pd
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler
 from transformers import (
     WEIGHTS_NAME,
@@ -36,12 +39,6 @@ from transformers import (
     AutoModelForSequenceClassification,
     BitsAndBytesConfig,
 )
-
-from tqdm import tqdm
-from linevul_model import LLMModel, GNNModel
-import pandas as pd
-
-# from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 
 
 # metrics
@@ -245,10 +242,7 @@ def train(
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps
     )
-    gnn_model.to(args.device)
-    # multi-gpu training
-    if args.n_gpu > 1:
-        gnn_model = torch.nn.DataParallel(gnn_model)
+    gnn_model = torch.nn.DataParallel(gnn_model)
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
@@ -287,16 +281,13 @@ def train(
             gnn_model.train()
 
             # Receive LLM final hidden states and send to device (default cuda:0)
-            llm_hidden_states, llm_attentions = hf_model(input_ids=inputs_ids)
+            llm_hidden_states = hf_model(input_ids=inputs_ids)
             llm_hidden_states.to(args.device)
-            if llm_attentions is not None:
-                llm_attentions.to(args.device)
             # GNN model forward pass
             loss, logits = gnn_model(
                 labels=labels,
                 graphs=graphs,
                 llm_hidden_states=llm_hidden_states,
-                llm_attentions=llm_attentions,
             )
 
             if args.n_gpu > 1:
@@ -876,26 +867,13 @@ def main():
             torch_dtype=torch.float16,
             quantization_config=bnb_config,
             output_hidden_states=True,
-            device_map="auto",
+            device_map="balanced",
         )
 
     # Set manual config options
     llm_model.config.num_labels = 1
     llm_model.config.num_attention_heads = args.num_attention_heads
     llm_model.config.pad_token_id = llm_model.model.config.eos_token_id
-
-    # PEFT and Lora configs (fractional trainable parameters)
-    # peft_config = LoraConfig(
-    #     inference_mode=False,
-    #     task_type="CAUSAL_LM",
-    #     r=8,
-    #     lora_alpha=32,
-    #     lora_dropout=0.1,
-    # )
-    # llm_model.gradient_checkpointing_enable()
-    # llm_model = prepare_model_for_kbit_training(llm_model)
-    # llm_model = get_peft_model(llm_model, peft_config)
-    # llm_model.print_trainable_parameters()
 
     # load all graphs
     if args.really_no_flowgnn:
@@ -921,14 +899,7 @@ def main():
             test_workers=0,
             split="fixed",
             batch_size=256,
-            # nsampling=False,
-            # nsampling_hops=1,
             seed=args.seed,
-            # test_every=False,
-            # dataflow_defined_only=False,
-            # codebert_feat=None,
-            # doc2vec_feat=None,
-            # glove_feat=None,
             concat_all_absdf=concat_all_absdf,
             # use_weighted_loss=False,
             # use_random_weighted_sampler=False,
@@ -964,14 +935,11 @@ def main():
 
     # Combined model
     if flowgnn_model:
-        if args.n_gpu > 1:
-            flowgnn_model = torch.nn.DataParallel(flowgnn_model)
-            flowgnn_model = flowgnn_model.module
-        else:
-            flowgnn_model.to(args.device)
+        flowgnn_model = torch.nn.DataParallel(flowgnn_model)
+        flowgnn_model = flowgnn_model.module
 
-    llm_model = LLMModel(llm_model, flowgnn_model, config, tokenizer, args)
-    gnn_model = GNNModel(flowgnn_model, config, args)
+    llm_model = LLMModel(llm_model, flowgnn_model, llm_model.config, tokenizer, args)
+    gnn_model = GNNModel(flowgnn_model, llm_model.config, args)
 
     # print number of params
     def count_params(model):
@@ -988,6 +956,7 @@ def main():
     if not args.no_flowgnn:
         print("flowgnn_encoder:", llm_model.flowgnn_encoder)
 
+    gnn_model = torch.nn.DataParallel(gnn_model)
     # Training
     if args.do_train:
         train_dataset = TextDataset(
@@ -1009,7 +978,6 @@ def main():
             args.output_dir, args.model_name, "checkpoint-best-f1", "model.bin"
         )
         gnn_model.load_state_dict(torch.load(output_dir))
-        gnn_model.to(args.device)
         evaluate(args, gnn_model, tokenizer)
     # Test
     if args.do_test:
@@ -1032,7 +1000,6 @@ def main():
                     args.output_dir, args.model_name, "checkpoint-best-f1", "model.bin"
                 )
         gnn_model.load_state_dict(torch.load(output_dir, map_location=args.device))
-        gnn_model.to(args.device)
         test_dataset = TextDataset(tokenizer, args, file_type="test", return_index=True)
         test(
             args,
