@@ -54,18 +54,15 @@ class LLMModel(LlamaForSequenceClassification):
             self.encoder.eval()
             attention_mask = input_ids.ne(1)
             outputs = self.encoder(
-                input_ids,
-                attention_mask=attention_mask,
-            )[0]
+                input_ids, attention_mask=attention_mask, output_hidden_states=True
+            )
         else:
-            outputs = self.encoder(inputs_embeds=input_embed)[0]
-            print(f"final llm outputs shape: {outputs.shape}")
-        last_hidden_state = outputs.last_hidden_state
-        model_object = self.encoder().cuda()
-        del model_object
-        gc.collect()
-        torch.cuda.empty_cache()
-        return last_hidden_state
+            outputs = self.encoder(inputs_embeds=input_embed, output_hidden_states=True)
+        hidden_states = outputs.hidden_states
+        attention_hidden_states = hidden_states[1:]
+        final_attention_states = attention_hidden_states[-1]
+        print(f"final_hidden_states shape: {final_attention_states.shape}")
+        return final_attention_states
 
 
 class GNNModel:
