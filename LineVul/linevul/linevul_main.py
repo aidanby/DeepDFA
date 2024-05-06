@@ -242,7 +242,9 @@ def train(
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps
     )
-    gnn_model = torch.nn.DataParallel(gnn_model)
+    # gnn_model.to(args.device)
+    # if args.n_gpu > 1:
+    #     gnn_model = torch.nn.DataParallel(gnn_model)
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
@@ -284,6 +286,7 @@ def train(
             llm_hidden_states = hf_model(input_ids=inputs_ids)
             llm_hidden_states.to(args.device)
             # GNN model forward pass
+
             loss, logits = gnn_model(
                 labels=labels,
                 graphs=graphs,
@@ -956,7 +959,9 @@ def main():
     if not args.no_flowgnn:
         print("flowgnn_encoder:", llm_model.flowgnn_encoder)
 
-    gnn_model = torch.nn.DataParallel(gnn_model)
+    gnn_model.to(args.device)
+    if args.n_gpu > 1:
+        gnn_model = torch.nn.DataParallel(gnn_model)
     # Training
     if args.do_train:
         train_dataset = TextDataset(

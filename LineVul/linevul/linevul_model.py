@@ -65,8 +65,9 @@ class LLMModel(LlamaForSequenceClassification):
         return final_attention_states
 
 
-class GNNModel:
+class GNNModel(LlamaForSequenceClassification):
     def __init__(self, flowgnn_encoder, config, args):
+        super(GNNModel, self).__init__(config=config)
         self.flowgnn_encoder = flowgnn_encoder
         self.classifier = ClassificationHead(
             config, 0 if args.no_flowgnn else self.flowgnn_encoder.out_dim
