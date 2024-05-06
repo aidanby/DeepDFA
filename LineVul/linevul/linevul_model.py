@@ -22,9 +22,6 @@ class ClassificationHead(nn.Module):
         # number examples x number tokens x hidden states length
         x = features[:, 0, :]  # take <s> token (equiv. to [CLS])
         if flowgnn_embed is not None:
-            print(f"flowgnn_embed shape: {flowgnn_embed.shape}")
-            print(f"x shape: {x.shape}")
-            # Force dimension 1 to be the same for x and flow_gnn_embed
             x = torch.cat((x, flowgnn_embed), dim=1)
         x = self.dropout(x)
         x = self.dense(x)
@@ -61,13 +58,12 @@ class LLMModel(LlamaForSequenceClassification):
         hidden_states = outputs.hidden_states
         attention_hidden_states = hidden_states[1:]
         final_attention_states = attention_hidden_states[-1]
-        print(f"final_hidden_states shape: {final_attention_states.shape}")
         return final_attention_states
 
 
-class GNNModel(LlamaForSequenceClassification):
+class GNNModel(nn.Module):
     def __init__(self, flowgnn_encoder, config, args):
-        super(GNNModel, self).__init__(config=config)
+        super().__init__()
         self.flowgnn_encoder = flowgnn_encoder
         self.classifier = ClassificationHead(
             config, 0 if args.no_flowgnn else self.flowgnn_encoder.out_dim

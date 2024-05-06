@@ -23,8 +23,8 @@ python3 linevul_main.py \
   --test_data_file=../data/$dataset/test.csv \
   --epochs 10 \
   --block_size 512 \
-  --train_batch_size 2 \
-  --eval_batch_size 2 \
+  --train_batch_size 4 \
+  --eval_batch_size 4 \
   --learning_rate 2e-5 \
   --max_grad_norm 1.0 \
   --evaluate_during_training \

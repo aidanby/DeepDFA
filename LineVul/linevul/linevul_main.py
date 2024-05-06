@@ -18,6 +18,9 @@ from __future__ import absolute_import, division, print_function
 import argparse
 import logging
 import os
+
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1, 2"
 import random
 import re
 import json
@@ -30,12 +33,9 @@ from linevul_model import LLMModel, GNNModel
 import pandas as pd
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler
 from transformers import (
-    WEIGHTS_NAME,
     AdamW,
     get_linear_schedule_with_warmup,
-    AutoConfig,
     AutoTokenizer,
-    AutoModelForCausalLM,
     AutoModelForSequenceClassification,
     BitsAndBytesConfig,
 )
@@ -212,8 +212,8 @@ def train(
     )
 
     args.max_steps = args.epochs * len(train_dataloader)
-    # evaluate the model per epoch
-    args.save_steps = len(train_dataloader)
+    # evaluate the model per 10 epochs
+    args.save_steps = len(train_dataloader) * 10
     args.warmup_steps = args.max_steps // 5
 
     # Prepare optimizer and schedule (linear warmup and decay)
@@ -242,9 +242,6 @@ def train(
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps
     )
-    # gnn_model.to(args.device)
-    # if args.n_gpu > 1:
-    #     gnn_model = torch.nn.DataParallel(gnn_model)
     # Train!
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_dataset))
@@ -284,9 +281,7 @@ def train(
 
             # Receive LLM final hidden states and send to device (default cuda:0)
             llm_hidden_states = hf_model(input_ids=inputs_ids)
-            llm_hidden_states.to(args.device)
             # GNN model forward pass
-
             loss, logits = gnn_model(
                 labels=labels,
                 graphs=graphs,
@@ -323,6 +318,7 @@ def train(
                 if global_step % args.save_steps == 0:
                     results = evaluate(
                         args,
+                        hf_model,
                         gnn_model,
                         tokenizer,
                         eval_dataset,
@@ -365,7 +361,7 @@ def train(
 
 
 def evaluate(
-    args, model, tokenizer, eval_dataset, flowgnn_dataset, eval_when_training=False
+    args, hf_model, gnn_model, tokenizer, eval_dataset, flowgnn_dataset, eval_when_training=False
 ):
     # build dataloader
     eval_sampler = SequentialSampler(eval_dataset)
@@ -376,10 +372,6 @@ def evaluate(
         num_workers=0,
     )
 
-    # multi-gpu evaluate
-    if args.n_gpu > 1 and eval_when_training is False:
-        model = torch.nn.DataParallel(model)
-
     # Eval!
     logger.info("***** Running evaluation *****")
     logger.info("  Num examples = %d", len(eval_dataset))
@@ -388,7 +380,7 @@ def evaluate(
     num_missing = 0
     eval_loss = 0.0
     nb_eval_steps = 0
-    model.eval()
+    gnn_model.eval()
     logits = []
     y_trues = []
     for batch in tqdm(eval_dataloader, desc="evaluate eval"):
@@ -402,7 +394,10 @@ def evaluate(
             inputs_ids = inputs_ids[keep_idx]
             labels = labels[keep_idx]
         with torch.no_grad():
-            lm_loss, logit = model(input_ids=inputs_ids, labels=labels, graphs=graphs)
+            llm_hidden_states = hf_model(input_ids=inputs_ids)
+            lm_loss, logit = gnn_model(
+                llm_hidden_states=llm_hidden_states, labels=labels, graphs=graphs
+            )
             eval_loss += lm_loss.mean().item()
             logits.append(logit.cpu().numpy())
             y_trues.append(labels.cpu().numpy())
@@ -434,7 +429,8 @@ def evaluate(
 
 def test(
     args,
-    model,
+    hf_model,
+    gnn_model,
     tokenizer,
     test_dataset,
     flowgnn_dataset,
@@ -450,10 +446,6 @@ def test(
         num_workers=0,
     )
 
-    # multi-gpu evaluate
-    if args.n_gpu > 1:
-        model = torch.nn.DataParallel(model)
-
     # Eval!
     logger.info("***** Running Test *****")
     logger.info("  Num examples = %d", len(test_dataset))
@@ -462,11 +454,11 @@ def test(
     num_missing = 0
     eval_loss = 0.0
     nb_eval_steps = 0
-    model.eval()
+    gnn_model.eval()
     logits = []
     y_trues = []
     if args.profile:
-        prof = FlopsProfiler(model)
+        prof = FlopsProfiler(gnn_model)
     if args.time:
         pass
     profs = []
@@ -490,7 +482,10 @@ def test(
         with torch.no_grad():
             if do_time:
                 start.record()
-            lm_loss, logit = model(input_ids=inputs_ids, labels=labels, graphs=graphs)
+            llm_hidden_states = hf_model(input_ids=inputs_ids)
+            lm_loss, logit = gnn_model(
+                llm_hidden_states=llm_hidden_states, labels=labels, graphs=graphs
+            )
             if do_time:
                 end.record()
             eval_loss += lm_loss.mean().item()
@@ -937,9 +932,9 @@ def main():
         logger.info("FlowGNN output dim: %d", flowgnn_model.out_dim)
 
     # Combined model
-    if flowgnn_model:
-        flowgnn_model = torch.nn.DataParallel(flowgnn_model)
-        flowgnn_model = flowgnn_model.module
+    # if flowgnn_model:
+    #     flowgnn_model = torch.nn.DataParallel(flowgnn_model)
+    #     flowgnn_model = flowgnn_model.module
 
     llm_model = LLMModel(llm_model, flowgnn_model, llm_model.config, tokenizer, args)
     gnn_model = GNNModel(flowgnn_model, llm_model.config, args)
@@ -960,8 +955,8 @@ def main():
         print("flowgnn_encoder:", llm_model.flowgnn_encoder)
 
     gnn_model.to(args.device)
-    if args.n_gpu > 1:
-        gnn_model = torch.nn.DataParallel(gnn_model)
+    # if args.n_gpu > 1:
+    #     gnn_model = torch.nn.DataParallel(gnn_model)
     # Training
     if args.do_train:
         train_dataset = TextDataset(
@@ -983,7 +978,7 @@ def main():
             args.output_dir, args.model_name, "checkpoint-best-f1", "model.bin"
         )
         gnn_model.load_state_dict(torch.load(output_dir))
-        evaluate(args, gnn_model, tokenizer)
+        evaluate(args, llm_model, gnn_model, tokenizer)
     # Test
     if args.do_test:
         if os.path.exists(args.model_name):
@@ -1008,6 +1003,7 @@ def main():
         test_dataset = TextDataset(tokenizer, args, file_type="test", return_index=True)
         test(
             args,
+            llm_model,
             gnn_model,
             tokenizer,
             test_dataset,
