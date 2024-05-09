@@ -19,8 +19,8 @@ import argparse
 import logging
 import os
 
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "1, 2"
+# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1, 2"
 import random
 import re
 import json
@@ -39,6 +39,7 @@ from transformers import (
     AutoModelForSequenceClassification,
     BitsAndBytesConfig,
 )
+from torch.utils.tensorboard import SummaryWriter
 
 
 # metrics
@@ -63,6 +64,24 @@ import dgl
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
 
 logger = logging.getLogger(__name__)
+
+
+def write_tensorboard(summary_writer: SummaryWriter, log_dict: dict, completed_steps):
+    for key, value in log_dict.items():
+        summary_writer.add_scalar(f"{key}", value, completed_steps)
+
+
+def process_checkpoint_dir(args, file_name):
+    file_name = str(file_name) + ".bin"
+    checkpoint_prefix = f"{args.model_type}-{args.model_name}"
+    if args.use_finetuned_model:
+        checkpoint_prefix += "-finetuned"
+
+    output_dir = os.path.join(args.output_dir, "{}".format(checkpoint_prefix))
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    output_dir = os.path.join(output_dir, "{}".format(file_name))
+    return output_dir
 
 
 class InputFeatures(object):
@@ -94,8 +113,8 @@ class TextDataset(Dataset):
         if "holdout" in os.path.basename(file_path):
             df["split"].replace("holdout", "test")
 
-        # if args.sample:
-        df = df.sample(100)
+        # Use sample for testing
+        # df = df.sample(250)
 
         if "processed_func" in df.columns:
             func_key = "processed_func"
@@ -197,11 +216,20 @@ def train(
     train_dataset,
     hf_model,
     gnn_model,
-    tokenizer,
     eval_dataset,
     flowgnn_dataset,
 ):
     """Train the model"""
+
+    # tensorboard writer
+    summary_writer = SummaryWriter(log_dir=args.tb_dir)
+
+    # load saved model
+    if args.load_checkpoint:
+        output_dir = process_checkpoint_dir(args, args.checkpoint_name)
+        print(f"loading model from checkpoint at {output_dir}")
+        gnn_model.load_state_dict(torch.load(output_dir, map_location=args.device))
+
     # build dataloader
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(
@@ -212,8 +240,7 @@ def train(
     )
 
     args.max_steps = args.epochs * len(train_dataloader)
-    # evaluate the model per 10 epochs
-    args.save_steps = len(train_dataloader) * 10
+    args.save_steps = int(len(train_dataloader) / 4)
     args.warmup_steps = args.max_steps // 5
 
     # Prepare optimizer and schedule (linear warmup and decay)
@@ -262,13 +289,12 @@ def train(
     best_f1 = 0
     gnn_model.zero_grad()
     num_missing = 0
-    for idx in range(args.epochs):
+    for batch_idx in range(args.epochs):
         bar = tqdm(train_dataloader, total=len(train_dataloader))
         tr_num = 0
         train_loss = 0
         for step, batch in enumerate(bar):
             (inputs_ids, labels, index) = [x.to(args.device) for x in batch]
-
             if flowgnn_dataset is None:
                 graphs = None
             else:
@@ -303,7 +329,10 @@ def train(
                 avg_loss = tr_loss
 
             avg_loss = round(train_loss / tr_num, 5)
-            bar.set_description("epoch {} loss {}".format(idx, avg_loss))
+            bar.set_description("epoch {} loss {}".format(batch_idx, avg_loss))
+
+            train_log_dict = {"training_loss": avg_loss}
+            write_tensorboard(summary_writer, train_log_dict, global_step + step)
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 optimizer.step()
@@ -320,48 +349,41 @@ def train(
                         args,
                         hf_model,
                         gnn_model,
-                        tokenizer,
                         eval_dataset,
                         flowgnn_dataset,
-                        eval_when_training=True,
                     )
 
+                    write_tensorboard(summary_writer, results, global_step + step)
+
                     # Save model checkpoint
-                    if results["eval_f1"] > best_f1:
+                    if results["eval_f1"] > best_f1 or batch_idx == 0:
                         best_f1 = results["eval_f1"]
                         logger.info("  " + "*" * 20)
                         logger.info("  Best f1:%s", round(best_f1, 4))
                         logger.info("  " + "*" * 20)
 
-                        checkpoint_prefix = "checkpoint-best-f1"
-                        output_dir = os.path.join(
-                            args.output_dir, "{}".format(checkpoint_prefix)
-                        )
-                        if not os.path.exists(output_dir):
-                            os.makedirs(output_dir)
                         model_to_save = (
                             gnn_model.module
                             if hasattr(gnn_model, "module")
                             else gnn_model
                         )
-                        output_dir = os.path.join(
-                            output_dir, "{}".format(args.model_name)
-                        )
+                        output_dir = process_checkpoint_dir(args, global_step + step)
                         torch.save(model_to_save.state_dict(), output_dir)
                         logger.info("Saving model checkpoint to %s", output_dir)
         logger.info("%d items missing", num_missing)
-        checkpoint_prefix = "checkpoint-last"
-        output_dir = os.path.join(args.output_dir, "{}".format(checkpoint_prefix))
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
         model_to_save = gnn_model.module if hasattr(gnn_model, "module") else gnn_model
-        output_dir = os.path.join(output_dir, "{}".format(args.model_name))
+        output_dir = process_checkpoint_dir(args, "final")
         torch.save(model_to_save.state_dict(), output_dir)
         logger.info("Saving model checkpoint to %s", output_dir)
+    summary_writer.close()
 
 
 def evaluate(
-    args, hf_model, gnn_model, tokenizer, eval_dataset, flowgnn_dataset, eval_when_training=False
+    args,
+    hf_model,
+    gnn_model,
+    eval_dataset,
+    flowgnn_dataset,
 ):
     # build dataloader
     eval_sampler = SequentialSampler(eval_dataset)
@@ -408,7 +430,6 @@ def evaluate(
     logits = np.concatenate(logits, 0)
     y_trues = np.concatenate(y_trues, 0)
     best_threshold = 0.5
-    best_f1 = 0
     y_preds = logits[:, 1] > best_threshold
     recall = recall_score(y_trues, y_preds)
     precision = precision_score(y_trues, y_preds)
@@ -418,6 +439,7 @@ def evaluate(
         "eval_precision": float(precision),
         "eval_f1": float(f1),
         "eval_threshold": best_threshold,
+        "eval_loss": float(eval_loss / nb_eval_steps),
     }
 
     logger.info("***** Eval results *****")
@@ -575,6 +597,20 @@ def main():
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
+        "--checkpoint_name",
+        default=None,
+        type=str,
+        required=False,
+        help="Checkpoint name for loading.",
+    )
+    parser.add_argument(
+        "--tb_dir",
+        default="../tensorboard/",
+        type=str,
+        required=False,
+        help="Tensorboard path.",
+    )
+    parser.add_argument(
         "--model_type",
         default="bert",
         type=str,
@@ -633,12 +669,14 @@ def main():
         type=int,
         help="Optional Code input sequence length after tokenization.",
     )
+    parser.add_argument(
+        "--load_checkpoint",
+        action="store_true",
+        help="Whether to load checkpoint for training.",
+    )
 
     parser.add_argument(
         "--do_train", action="store_true", help="Whether to run training."
-    )
-    parser.add_argument(
-        "--do_eval", action="store_true", help="Whether to run eval on the dev set."
     )
     parser.add_argument(
         "--do_test", action="store_true", help="Whether to run eval on the dev set."
@@ -781,7 +819,6 @@ def main():
     parser.add_argument(
         "--use_finetuned_model",
         action="store_true",
-        default=False,
         help="Whether to use finetuned LLM model",
     )
     parser.add_argument(
@@ -858,11 +895,11 @@ def main():
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=torch.bfloat16,
         )
         llm_model = AutoModelForSequenceClassification.from_pretrained(
             args.model_name_or_path,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
             quantization_config=bnb_config,
             output_hidden_states=True,
             device_map="balanced",
@@ -931,11 +968,6 @@ def main():
         )
         logger.info("FlowGNN output dim: %d", flowgnn_model.out_dim)
 
-    # Combined model
-    # if flowgnn_model:
-    #     flowgnn_model = torch.nn.DataParallel(flowgnn_model)
-    #     flowgnn_model = flowgnn_model.module
-
     llm_model = LLMModel(llm_model, flowgnn_model, llm_model.config, tokenizer, args)
     gnn_model = GNNModel(flowgnn_model, llm_model.config, args)
 
@@ -955,50 +987,26 @@ def main():
         print("flowgnn_encoder:", llm_model.flowgnn_encoder)
 
     gnn_model.to(args.device)
-    # if args.n_gpu > 1:
-    #     gnn_model = torch.nn.DataParallel(gnn_model)
+
     # Training
     if args.do_train:
         train_dataset = TextDataset(
             tokenizer, args, file_type="train", return_index=True
         )
         eval_dataset = TextDataset(tokenizer, args, file_type="eval", return_index=True)
+
         train(
             args,
             train_dataset,
             llm_model,
             gnn_model,
-            tokenizer,
             eval_dataset,
             flowgnn_dataset,
         )
-    # Evaluation
-    if args.do_eval:
-        output_dir = os.path.join(
-            args.output_dir, args.model_name, "checkpoint-best-f1", "model.bin"
-        )
-        gnn_model.load_state_dict(torch.load(output_dir))
-        evaluate(args, llm_model, gnn_model, tokenizer)
+
     # Test
     if args.do_test:
-        if os.path.exists(args.model_name):
-            output_dir = args.model_name
-        else:
-            checkpoint_prefix = f"checkpoint-best-f1/{args.model_name}"
-            output_dir = os.path.join(args.output_dir, checkpoint_prefix)
-            if not os.path.exists(output_dir):
-                output_dir = os.path.join(
-                    args.output_dir, "checkpoint-best-f1", args.model_name
-                )
-            if not os.path.exists(output_dir):
-                output_dir = os.path.join(
-                    args.output_dir, args.model_name, "checkpoint-best-f1", "model.bin"
-                )
-            if not os.path.exists(output_dir):
-                # linevul/saved_models/dataset_size/imbalanced_0.01/checkpoint-best-f1
-                output_dir = os.path.join(
-                    args.output_dir, args.model_name, "checkpoint-best-f1", "model.bin"
-                )
+        output_dir = process_checkpoint_dir(args, "final")
         gnn_model.load_state_dict(torch.load(output_dir, map_location=args.device))
         test_dataset = TextDataset(tokenizer, args, file_type="test", return_index=True)
         test(

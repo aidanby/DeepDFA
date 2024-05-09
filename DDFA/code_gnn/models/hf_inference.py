@@ -4,6 +4,7 @@ from transformers import (
     AutoConfig,
     AutoTokenizer,
     AutoModelForCausalLM,
+    AutoModelForSequenceClassification
 )
 from peft import PeftModel
 
@@ -81,7 +82,7 @@ def load_model_tokenizer(
     )
     print(tokenizer)
 
-    base_model = AutoModelForCausalLM.from_pretrained(
+    base_model = AutoModelForSequenceClassification.from_pretrained(
         path,
         config=config,
         load_in_8bit=(quantization == "8bit"),
@@ -89,8 +90,6 @@ def load_model_tokenizer(
         device_map="auto",
         torch_dtype=torch_dtype,
         trust_remote_code=True,
-        low_cpu_mem_usage=True,
-        output_hidden_states=True,
     )
 
     if peft_path:
@@ -168,5 +167,6 @@ class PeftInference:
             peft_path=self.lora_adapter,
             eos_token="</s>",
             pad_token="<unk>",
+            quantization="4bit",
         )
         return model, tokenizer
