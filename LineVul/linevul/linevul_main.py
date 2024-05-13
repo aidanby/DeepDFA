@@ -114,7 +114,7 @@ class TextDataset(Dataset):
             df["split"].replace("holdout", "test")
 
         # Use sample for testing
-        # df = df.sample(250)
+        # df = df.sample(100)
 
         if "processed_func" in df.columns:
             func_key = "processed_func"
@@ -308,11 +308,12 @@ def train(
             # Receive LLM final hidden states and send to device (default cuda:0)
             llm_hidden_states = hf_model(input_ids=inputs_ids)
             # GNN model forward pass
-            loss, logits = gnn_model(
-                labels=labels,
-                graphs=graphs,
-                llm_hidden_states=llm_hidden_states,
-            )
+            with torch.cuda.amp.autocast():
+                loss, logits = gnn_model(
+                    labels=labels,
+                    graphs=graphs,
+                    llm_hidden_states=llm_hidden_states,
+                )
 
             if args.n_gpu > 1:
                 loss = loss.mean()
@@ -417,9 +418,10 @@ def evaluate(
             labels = labels[keep_idx]
         with torch.no_grad():
             llm_hidden_states = hf_model(input_ids=inputs_ids)
-            lm_loss, logit = gnn_model(
-                llm_hidden_states=llm_hidden_states, labels=labels, graphs=graphs
-            )
+            with torch.cuda.amp.autocast():
+                lm_loss, logit = gnn_model(
+                    llm_hidden_states=llm_hidden_states, labels=labels, graphs=graphs
+                )
             eval_loss += lm_loss.mean().item()
             logits.append(logit.cpu().numpy())
             y_trues.append(labels.cpu().numpy())
@@ -505,9 +507,10 @@ def test(
             if do_time:
                 start.record()
             llm_hidden_states = hf_model(input_ids=inputs_ids)
-            lm_loss, logit = gnn_model(
-                llm_hidden_states=llm_hidden_states, labels=labels, graphs=graphs
-            )
+            with torch.cuda.amp.autocast():
+                lm_loss, logit = gnn_model(
+                    llm_hidden_states=llm_hidden_states, labels=labels, graphs=graphs
+                )
             if do_time:
                 end.record()
             eval_loss += lm_loss.mean().item()

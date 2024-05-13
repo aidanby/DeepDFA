@@ -19,7 +19,6 @@ class ClassificationHead(nn.Module):
         self.out_proj = nn.Linear(config.hidden_size, 2)
 
     def forward(self, features, flowgnn_embed, **kwargs):
-        # number examples x number tokens x hidden states length
         x = features[:, 0, :]  # take <s> token (equiv. to [CLS])
         if flowgnn_embed is not None:
             x = torch.cat((x, flowgnn_embed), dim=1)

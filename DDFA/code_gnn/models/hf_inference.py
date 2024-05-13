@@ -13,7 +13,7 @@ def load_model_tokenizer(
     path,
     model_type=None,
     peft_path=None,
-    torch_dtype=torch.bfloat16,
+    torch_dtype=torch.float16,
     quantization=None,
     eos_token=None,
     pad_token=None,
