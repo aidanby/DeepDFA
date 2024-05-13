@@ -114,7 +114,7 @@ class TextDataset(Dataset):
             df["split"].replace("holdout", "test")
 
         # Use sample for testing
-        # df = df.sample(100)
+        df = df.sample(10000)
 
         if "processed_func" in df.columns:
             func_key = "processed_func"
@@ -240,7 +240,7 @@ def train(
     )
 
     args.max_steps = args.epochs * len(train_dataloader)
-    args.save_steps = int(len(train_dataloader) / 4)
+    args.save_steps = int(len(train_dataloader) / 10)
     args.warmup_steps = args.max_steps // 5
 
     # Prepare optimizer and schedule (linear warmup and decay)
