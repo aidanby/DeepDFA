@@ -12,7 +12,7 @@ shift
 python3 linevul_main.py \
   --model_name=finetuned-bigvul \
   --tb_dir=../tensorboard/finetuned-bigvul/ \
-  --finetuned_path=../finetune_checkpoints/checkpoints_bigvul_codellama/step_2500 \
+  --finetuned_path=../finetune_checkpoints/checkpoints_bigvul_codellama/checkpoint \
   --model_type=llama \
   --tokenizer_name=codellama/CodeLlama-13b-Instruct-hf \
   --model_name_or_path=codellama/CodeLlama-13b-Instruct-hf \

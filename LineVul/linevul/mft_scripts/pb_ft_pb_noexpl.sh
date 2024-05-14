@@ -10,12 +10,12 @@ shift
 shift
 
 python3 linevul_main.py \
-  --model_name=finetuned-bigvul-nodfa \
-  --tb_dir=../tensorboard/finetuned-bigvul-nodfa/ \
-  --finetuned_path=../finetune_checkpoints/checkpoints_bigvul_codellama/checkpoint \
+  --model_name=pbfinetuned-pb-noexpl \
+  --tb_dir=../tensorboard/pbfinetuned-pb-noexpl/ \
   --model_type=llama \
   --tokenizer_name=codellama/CodeLlama-13b-Instruct-hf \
   --model_name_or_path=codellama/CodeLlama-13b-Instruct-hf \
+  --finetuned_path=../finetune_checkpoints/checkpoints_pb_noexpl/checkpoint \
   --output_dir=./saved_models \
   --do_train \
   --do_test \
@@ -23,10 +23,10 @@ python3 linevul_main.py \
   --eval_data_file=../data/$dataset/val.csv \
   --test_data_file=../data/$dataset/test.csv \
   --epochs 5 \
-  --block_size 512 \
+  --block_size 256 \
   --train_batch_size 2 \
   --eval_batch_size 2 \
-  --learning_rate 2e-5 \
+  --learning_rate 1e-6 \
   --max_grad_norm 1.0 \
   --evaluate_during_training \
   --use_finetuned_model \

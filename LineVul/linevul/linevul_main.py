@@ -114,7 +114,8 @@ class TextDataset(Dataset):
             df["split"].replace("holdout", "test")
 
         # Use sample for testing
-        df = df.sample(10000)
+        if len(df.index) > 5000:
+            df = df.sample(5000, replace=True)
 
         if "processed_func" in df.columns:
             func_key = "processed_func"
@@ -240,7 +241,8 @@ def train(
     )
 
     args.max_steps = args.epochs * len(train_dataloader)
-    args.save_steps = int(len(train_dataloader) / 10)
+    # How many steps before eval
+    args.save_steps = int(len(train_dataloader))
     args.warmup_steps = args.max_steps // 5
 
     # Prepare optimizer and schedule (linear warmup and decay)
@@ -431,7 +433,7 @@ def evaluate(
     # calculate scores
     logits = np.concatenate(logits, 0)
     y_trues = np.concatenate(y_trues, 0)
-    best_threshold = 0.5
+    best_threshold = 0.2
     y_preds = logits[:, 1] > best_threshold
     recall = recall_score(y_trues, y_preds)
     precision = precision_score(y_trues, y_preds)

@@ -15,7 +15,7 @@ python3 linevul_main.py \
   --model_type=llama \
   --tokenizer_name=codellama/CodeLlama-13b-Instruct-hf \
   --model_name_or_path=codellama/CodeLlama-13b-Instruct-hf \
-  --finetuned_path=../finetune_checkpoints/checkpoints_bigvul_codellama/step_2500 \
+  --finetuned_path=../finetune_checkpoints/checkpoints_bigvul_codellama/checkpoint \
   --output_dir=./saved_models \
   --do_train \
   --do_test \

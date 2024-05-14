@@ -13,9 +13,9 @@ python3 linevul_main.py \
   --model_name=pbfinetuned-pb \
   --tb_dir=../tensorboard/pbfinetuned-pb/ \
   --model_type=llama \
-  --tokenizer_name=codellama/CodeLlama-7b-Instruct-hf \
-  --model_name_or_path=codellama/CodeLlama-7b-Instruct-hf \
-  --finetuned_path=../finetune_checkpoints/checkpoints_precisebugs_codellama/step_20000 \
+  --tokenizer_name=codellama/CodeLlama-13b-Instruct-hf \
+  --model_name_or_path=codellama/CodeLlama-13b-Instruct-hf \
+  --finetuned_path=../finetune_checkpoints/checkpoints_pb_expl/checkpoint \
   --output_dir=./saved_models \
   --do_train \
   --do_test \
