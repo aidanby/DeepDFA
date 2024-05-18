@@ -34,13 +34,14 @@ import pandas as pd
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler
 from transformers import (
     AdamW,
-    get_linear_schedule_with_warmup,
+    get_cosine_schedule_with_warmup,
     AutoTokenizer,
     AutoModelForSequenceClassification,
     BitsAndBytesConfig,
 )
 from torch.utils.tensorboard import SummaryWriter
 
+from sklearn.model_selection import train_test_split
 
 # metrics
 from sklearn.metrics import (
@@ -52,18 +53,21 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
-# word-level tokenizer
-from tokenizers import Tokenizer
-
 deepdfa = path.abspath(path.join(__file__, "../../../DDFA/"))
 sys.path.append(deepdfa)
 from code_gnn.models.flow_gnn.ggnn import FlowGNNGGNNModule
 from sastvd.linevd.datamodule import BigVulDatasetLineVDDataModule
-from code_gnn.models.hf_inference import PeftInference
+from hf_inference import PeftInference
 import dgl
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
 
 logger = logging.getLogger(__name__)
+
+# Testing uses
+eval_steps = 4
+test_sample_size = None
+test_sample_size = 10000
+printout_sample = False
 
 
 def write_tensorboard(summary_writer: SummaryWriter, log_dict: dict, completed_steps):
@@ -96,26 +100,56 @@ class InputFeatures(object):
 
 class TextDataset(Dataset):
     def __init__(self, tokenizer, args, file_type="train", return_index=False):
-        if file_type == "train":
+        if "devign" in args.train_data_file:
             file_path = args.train_data_file
-        elif file_type == "eval":
-            file_path = args.eval_data_file
-        elif file_type == "test":
-            file_path = args.test_data_file
+            file_path = (
+                file_path.replace("train.csv", "function.json")
+                .replace("val.csv", "function.json")
+                .replace("test.csv", "function.json")
+            )
+        else:
+            if file_type == "train":
+                file_path = args.train_data_file
+            elif file_type == "eval":
+                file_path = args.eval_data_file
+            elif file_type == "test":
+                file_path = args.test_data_file
         self.examples = []
 
-        if file_path.endswith(".jsonl"):
-            df = pd.read_json(file_path, orient="records", lines=True)
+        if file_path.endswith(".json"):
+            print(f"loading json file: {file_path}")
+            with open(file_path, "r") as file:
+                json_data = json.load(file)
+            df = pd.json_normalize(json_data)
         elif file_path.endswith(".csv"):
+            print(f"loading csv file: {file_path}")
             df = pd.read_csv(file_path, index_col=0)
         else:
             raise NotImplementedError(file_path)
         if "holdout" in os.path.basename(file_path):
             df["split"].replace("holdout", "test")
 
+        if "devign" in args.train_data_file:
+            train, eval_test = train_test_split(
+                df, train_size=0.8, test_size=0.2, shuffle=False
+            )
+            eval, test = train_test_split(
+                eval_test, train_size=0.5, test_size=0.5, shuffle=False
+            )
+            # split df into 80% trainig, 10% eval, 10% test
+            if file_type == "train":
+                df = train
+            elif file_type == "eval":
+                df = eval
+            elif file_type == "test":
+                df = test
+
         # Use sample for testing
-        if len(df.index) > 5000:
-            df = df.sample(5000, replace=True)
+        if test_sample_size:
+            if file_type == "train":
+                df = df.sample(test_sample_size, replace=True)
+            else:
+                df = df.sample(int(test_sample_size / 10), replace=True)
 
         if "processed_func" in df.columns:
             func_key = "processed_func"
@@ -134,6 +168,7 @@ class TextDataset(Dataset):
 
             df[func_key] = df[func_key].apply(zonk)
         funcs = df[func_key].tolist()
+        print(df["target"])
         labels = df["target"].astype(int).tolist()
         indices = df.index.astype(int).tolist()
         for i in tqdm(range(len(funcs)), desc="load dataset"):
@@ -213,17 +248,13 @@ def set_seed(args):
 
 
 def train(
-    args,
-    train_dataset,
-    hf_model,
-    gnn_model,
-    eval_dataset,
-    flowgnn_dataset,
+    args, train_dataset, hf_model, gnn_model, eval_dataset, flowgnn_dataset, tokenizer
 ):
     """Train the model"""
 
     # tensorboard writer
-    summary_writer = SummaryWriter(log_dir=args.tb_dir)
+    tb_dir = os.path.join(args.tb_dir, args.model_name)
+    summary_writer = SummaryWriter(log_dir=tb_dir)
 
     # load saved model
     if args.load_checkpoint:
@@ -242,8 +273,8 @@ def train(
 
     args.max_steps = args.epochs * len(train_dataloader)
     # How many steps before eval
-    args.save_steps = int(len(train_dataloader))
-    args.warmup_steps = args.max_steps // 5
+    args.save_steps = int(len(train_dataloader) / eval_steps)
+    args.warmup_steps = args.max_steps // 10
 
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ["bias", "LayerNorm.weight"]
@@ -268,7 +299,7 @@ def train(
     optimizer = AdamW(
         optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon
     )
-    scheduler = get_linear_schedule_with_warmup(
+    scheduler = get_cosine_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps
     )
     # Train!
@@ -334,7 +365,10 @@ def train(
             avg_loss = round(train_loss / tr_num, 5)
             bar.set_description("epoch {} loss {}".format(batch_idx, avg_loss))
 
-            train_log_dict = {"training_loss": avg_loss}
+            train_log_dict = {
+                "training_loss": avg_loss,
+                "learning_rate": scheduler.get_last_lr()[0],
+            }
             write_tensorboard(summary_writer, train_log_dict, global_step + step)
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -354,6 +388,7 @@ def train(
                         gnn_model,
                         eval_dataset,
                         flowgnn_dataset,
+                        tokenizer,
                     )
 
                     write_tensorboard(summary_writer, results, global_step + step)
@@ -387,6 +422,7 @@ def evaluate(
     gnn_model,
     eval_dataset,
     flowgnn_dataset,
+    tokenizer,
 ):
     # build dataloader
     eval_sampler = SequentialSampler(eval_dataset)
@@ -408,6 +444,7 @@ def evaluate(
     gnn_model.eval()
     logits = []
     y_trues = []
+    best_threshold = 0.5
     for batch in tqdm(eval_dataloader, desc="evaluate eval"):
         (inputs_ids, labels, index) = [x.to(args.device) for x in batch]
 
@@ -418,6 +455,7 @@ def evaluate(
             num_missing += len(labels) - len(keep_idx)
             inputs_ids = inputs_ids[keep_idx]
             labels = labels[keep_idx]
+
         with torch.no_grad():
             llm_hidden_states = hf_model(input_ids=inputs_ids)
             with torch.cuda.amp.autocast():
@@ -427,13 +465,26 @@ def evaluate(
             eval_loss += lm_loss.mean().item()
             logits.append(logit.cpu().numpy())
             y_trues.append(labels.cpu().numpy())
+
+            if printout_sample:
+                test_logits = np.concatenate(logits, 0)
+                test_y_trues = np.concatenate(y_trues, 0)
+                test_y_preds = test_logits[:, 1] > best_threshold
+                print(test_y_trues)
+                print(test_y_preds)
+                if test_y_preds.any() == test_y_trues.any() and test_y_trues.any():
+                    print("Correct prediction")
+                    for input in inputs_ids:
+                        tokens = tokenizer.decode(input)
+                    print(tokens)
+
         nb_eval_steps += 1
     logger.info("%d items missing", num_missing)
 
     # calculate scores
     logits = np.concatenate(logits, 0)
     y_trues = np.concatenate(y_trues, 0)
-    best_threshold = 0.2
+
     y_preds = logits[:, 1] > best_threshold
     recall = recall_score(y_trues, y_preds)
     precision = precision_score(y_trues, y_preds)
@@ -663,18 +714,6 @@ def main():
         help="Whether to use non-pretrained model.",
     )
     parser.add_argument(
-        "--tokenizer_name",
-        default="",
-        type=str,
-        help="Optional pretrained tokenizer name or path if not the same as model_name_or_path",
-    )
-    parser.add_argument(
-        "--code_length",
-        default=256,
-        type=int,
-        help="Optional Code input sequence length after tokenization.",
-    )
-    parser.add_argument(
         "--load_checkpoint",
         action="store_true",
         help="Whether to load checkpoint for training.",
@@ -697,19 +736,6 @@ def main():
         action="store_true",
         help="Run evaluation during training at each logging step.",
     )
-    parser.add_argument(
-        "--do_local_explanation",
-        default=False,
-        action="store_true",
-        help="Whether to do local explanation. ",
-    )
-    parser.add_argument(
-        "--reasoning_method",
-        default=None,
-        type=str,
-        help="Should be one of 'attention', 'shap', 'lime', 'lig'",
-    )
-
     parser.add_argument(
         "--train_batch_size",
         default=4,
@@ -756,42 +782,6 @@ def main():
         "--seed", type=int, default=42, help="random seed for initialization"
     )
     parser.add_argument("--epochs", type=int, default=1, help="training epochs")
-    # RQ2
-    parser.add_argument(
-        "--effort_at_top_k",
-        default=0.2,
-        type=float,
-        help="Effort@TopK%Recall: effort at catching top k percent of vulnerable lines",
-    )
-    parser.add_argument(
-        "--top_k_recall_by_lines",
-        default=0.01,
-        type=float,
-        help="Recall@TopK percent, sorted by line scores",
-    )
-    parser.add_argument(
-        "--top_k_recall_by_pred_prob",
-        default=0.2,
-        type=float,
-        help="Recall@TopK percent, sorted by prediction probabilities",
-    )
-
-    parser.add_argument(
-        "--do_sorting_by_line_scores",
-        default=False,
-        action="store_true",
-        help="Whether to do sorting by line scores.",
-    )
-    parser.add_argument(
-        "--do_sorting_by_pred_prob",
-        default=False,
-        action="store_true",
-        help="Whether to do sorting by prediction probabilities.",
-    )
-    # RQ3 - line-level evaluation
-    parser.add_argument(
-        "--top_k_constant", type=int, default=10, help="Top-K Accuracy constant"
-    )
     # num of attention heads
     parser.add_argument(
         "--num_attention_heads",
@@ -831,7 +821,6 @@ def main():
         default="/home/checkpoints_codellama7/step_1200",
         type=str,
     )
-
     parser.add_argument(
         "--no_flowgnn",
         action="store_true",
@@ -875,17 +864,11 @@ def main():
     set_seed(args)
 
     # Load LLM
-    if args.use_word_level_tokenizer:
-        print("using wordlevel tokenizer!")
-        tokenizer = Tokenizer.from_file("./word_level_tokenizer/wordlevel.json")
-    elif args.use_non_pretrained_tokenizer:
-        tokenizer = AutoTokenizer(
-            vocab_file="bpe_tokenizer/bpe_tokenizer-vocab.json",
-            merges_file="bpe_tokenizer/bpe_tokenizer-merges.txt",
-        )
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-        tokenizer.padding_side = "left"
+    tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
+    tokenizer.padding_side = "left"
+
+    train_dataset = TextDataset(tokenizer, args, file_type="train", return_index=True)
+    eval_dataset = TextDataset(tokenizer, args, file_type="eval", return_index=True)
 
     if args.use_finetuned_model:
         logger.info(f"Loading finetuned model from {args.model_name_or_path} ")
@@ -995,11 +978,6 @@ def main():
 
     # Training
     if args.do_train:
-        train_dataset = TextDataset(
-            tokenizer, args, file_type="train", return_index=True
-        )
-        eval_dataset = TextDataset(tokenizer, args, file_type="eval", return_index=True)
-
         train(
             args,
             train_dataset,
@@ -1007,6 +985,7 @@ def main():
             gnn_model,
             eval_dataset,
             flowgnn_dataset,
+            tokenizer,
         )
 
     # Test

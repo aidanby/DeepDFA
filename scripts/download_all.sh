@@ -16,3 +16,7 @@ unzip preprocessed_data.zip
 # DeepDFA CFGs
 curl -Lo before.zip 'https://figshare.com/ndownloader/files/43916550'
 unzip before.zip -d DDFA/storage/processed/bigvul
+
+
+curl -Lo devign.zip 'https://drive.google.com/file/d/1x6hoF7G-tSYxg8AFybggypLZgMGDNHfF'
+unzip devign.zip -d LineVul/data/devign

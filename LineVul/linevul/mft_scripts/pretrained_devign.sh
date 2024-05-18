@@ -10,7 +10,7 @@ shift
 shift
 
 python3 linevul_main.py \
-  --model_name=pbfinetuned-pb_expl \
+  --model_name=pretrained-devign \
   --tb_dir=../tensorboard/ \
   --model_type=llama \
   --model_name_or_path=codellama/CodeLlama-7b-hf \
@@ -25,8 +25,9 @@ python3 linevul_main.py \
   --block_size 256 \
   --train_batch_size 2 \
   --eval_batch_size 2 \
-  --learning_rate 1e-6 \
+  --learning_rate 1e-5 \
   --max_grad_norm 1.0 \
   --evaluate_during_training \
-  --use_finetuned_model \
+  --no_flowgnn \
+  --really_no_flowgnn \
   --seed $seed $@ 2>&1 | tee "train_${dataset}_${seed}.log"

@@ -11,10 +11,9 @@ shift
 
 python3 linevul_main.py \
   --model_name=pbfinetuned-bigvul/ \
-  --tb_dir=../tensorboard/pbfinetuned-bigvul/ \
+  --tb_dir=../tensorboard/ \
   --model_type=llama \
-  --tokenizer_name=codellama/CodeLlama-7b-Instruct-hf \
-  --model_name_or_path=codellama/CodeLlama-7b-Instruct-hf \
+  --model_name_or_path=codellama/CodeLlama-7b-hf \
   --finetuned_path=../finetune_checkpoints/checkpoints_pb_codellama/checkpoint \
   --output_dir=./saved_models \
   --do_train \
@@ -24,8 +23,8 @@ python3 linevul_main.py \
   --test_data_file=../data/$dataset/test.csv \
   --epochs 5 \
   --block_size 512 \
-  --train_batch_size 2 \
-  --eval_batch_size 2 \
+  --train_batch_size 4 \
+  --eval_batch_size 4 \
   --learning_rate 5e-5 \
   --max_grad_norm 1.0 \
   --evaluate_during_training \

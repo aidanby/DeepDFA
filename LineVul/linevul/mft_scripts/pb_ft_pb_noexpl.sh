@@ -11,10 +11,9 @@ shift
 
 python3 linevul_main.py \
   --model_name=pbfinetuned-pb-noexpl \
-  --tb_dir=../tensorboard/pbfinetuned-pb-noexpl/ \
+  --tb_dir=../tensorboard/ \
   --model_type=llama \
-  --tokenizer_name=codellama/CodeLlama-13b-Instruct-hf \
-  --model_name_or_path=codellama/CodeLlama-13b-Instruct-hf \
+  --model_name_or_path=codellama/CodeLlama-13b-hf \
   --finetuned_path=../finetune_checkpoints/checkpoints_pb_noexpl/checkpoint \
   --output_dir=./saved_models \
   --do_train \
