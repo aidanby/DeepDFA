@@ -21,11 +21,11 @@ python3 linevul_main.py \
   --train_data_file=../data/$dataset/train.csv \
   --eval_data_file=../data/$dataset/val.csv \
   --test_data_file=../data/$dataset/test.csv \
-  --epochs 3 \
-  --block_size 256 \
-  --train_batch_size 2 \
-  --eval_batch_size 2 \
-  --learning_rate 5e-6 \
+  --epochs 5 \
+  --block_size 1024 \
+  --train_batch_size 4 \
+  --eval_batch_size 4 \
+  --learning_rate 1e-5 \
   --max_grad_norm 1.0 \
   --evaluate_during_training \
   --no_flowgnn \

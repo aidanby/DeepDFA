@@ -4,7 +4,8 @@ from transformers import (
     AutoConfig,
     AutoTokenizer,
     AutoModelForCausalLM,
-    AutoModelForSequenceClassification
+    AutoModelForSequenceClassification,
+    BitsAndBytesConfig,
 )
 from peft import PeftModel
 
@@ -82,11 +83,19 @@ def load_model_tokenizer(
     )
     print(tokenizer)
 
-    base_model = AutoModelForSequenceClassification.from_pretrained(
+    bnb_config = BitsAndBytesConfig(
+        bnb_4bit_use_double_quant=True,
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+
+    base_model = AutoModelForCausalLM.from_pretrained(
         path,
         config=config,
-        load_in_8bit=(quantization == "8bit"),
-        load_in_4bit=(quantization == "4bit"),
+        # load_in_8bit=(quantization == "8bit"),
+        # load_in_4bit=(quantization == "4bit"),
+        quantization_config=bnb_config,
         device_map="auto",
         torch_dtype=torch_dtype,
         trust_remote_code=True,

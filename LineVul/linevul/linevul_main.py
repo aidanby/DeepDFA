@@ -1,26 +1,7 @@
-# coding=utf-8
-# Copyright 2018 The Google AI Language Team Authors and The HuggingFace Inc. team.
-# Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 from __future__ import absolute_import, division, print_function
 import argparse
 import logging
 import os
-
-# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1, 2"
 import random
 import re
 import json
@@ -66,8 +47,10 @@ logger = logging.getLogger(__name__)
 # Testing uses
 eval_steps = 4
 test_sample_size = None
-test_sample_size = 10000
+test_sample_size = 500
 printout_sample = False
+eval_first = True
+initial_threshold = 0.55
 
 
 def write_tensorboard(summary_writer: SummaryWriter, log_dict: dict, completed_steps):
@@ -168,7 +151,6 @@ class TextDataset(Dataset):
 
             df[func_key] = df[func_key].apply(zonk)
         funcs = df[func_key].tolist()
-        print(df["target"])
         labels = df["target"].astype(int).tolist()
         indices = df.index.astype(int).tolist()
         for i in tqdm(range(len(funcs)), desc="load dataset"):
@@ -197,13 +179,14 @@ class TextDataset(Dataset):
     def __getitem__(self, i):
         if self.return_index:
             return (
-                torch.tensor(self.examples[i].input_ids),
-                torch.tensor(self.examples[i].label),
-                torch.tensor(self.examples[i].index),
+                torch.as_tensor(self.examples[i].input_ids),
+                torch.as_tensor(self.examples[i].label),
+                torch.as_tensor(self.examples[i].index),
             )
         else:
-            return torch.tensor(self.examples[i].input_ids), torch.tensor(
-                self.examples[i].label
+            return (
+                torch.as_tensor(self.examples[i].input_ids),
+                torch.as_tensor(self.examples[i].label),
             )
 
 
@@ -274,7 +257,7 @@ def train(
     args.max_steps = args.epochs * len(train_dataloader)
     # How many steps before eval
     args.save_steps = int(len(train_dataloader) / eval_steps)
-    args.warmup_steps = args.max_steps // 10
+    args.warmup_steps = args.max_steps // 50
 
     # Prepare optimizer and schedule (linear warmup and decay)
     no_decay = ["bias", "LayerNorm.weight"]
@@ -296,16 +279,14 @@ def train(
             "weight_decay": 0.0,
         },
     ]
-    optimizer = AdamW(
+    optimizer = torch.optim.AdamW(
         optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon
     )
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, num_warmup_steps=args.warmup_steps, num_training_steps=args.max_steps
     )
-    # Train!
-    logger.info("***** Running training *****")
-    logger.info("  Num examples = %d", len(train_dataset))
-    logger.info("  Num Epochs = %d", args.epochs)
+    global_step = 0
+    output_dir = process_checkpoint_dir(args, "test")
     logger.info(
         "  Instantaneous batch size per GPU = %d",
         args.train_batch_size // max(args.n_gpu, 1),
@@ -314,10 +295,39 @@ def train(
         "  Total train batch size = %d",
         args.train_batch_size * args.gradient_accumulation_steps,
     )
+
+    # Evaluate results before any training
+    if eval_first:
+        logger.info("***** First eval *****")
+        # test_dataset = TextDataset(tokenizer, args, file_type="test", return_index=True)
+        # results = test(
+        #     args,
+        #     hf_model,
+        #     gnn_model,
+        #     test_dataset,
+        #     flowgnn_dataset,
+        #     output_dir,
+        #     initial_threshold,
+        # )
+        # write_tensorboard(summary_writer, results, global_step)
+
+        results = evaluate(
+            args,
+            hf_model,
+            gnn_model,
+            eval_dataset,
+            flowgnn_dataset,
+            initial_threshold,
+        )
+        write_tensorboard(summary_writer, results, global_step)
+
+    # Train!
+    logger.info("***** Running training *****")
+    logger.info("  Num examples = %d", len(train_dataset))
+    logger.info("  Num Epochs = %d", args.epochs)
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", args.max_steps)
 
-    global_step = 0
     tr_loss, logging_loss, avg_loss, tr_nb, tr_num, train_loss = 0.0, 0.0, 0.0, 0, 0, 0
     best_f1 = 0
     gnn_model.zero_grad()
@@ -388,7 +398,7 @@ def train(
                         gnn_model,
                         eval_dataset,
                         flowgnn_dataset,
-                        tokenizer,
+                        args.best_threshold,
                     )
 
                     write_tensorboard(summary_writer, results, global_step + step)
@@ -422,8 +432,9 @@ def evaluate(
     gnn_model,
     eval_dataset,
     flowgnn_dataset,
-    tokenizer,
+    best_threshold,
 ):
+
     # build dataloader
     eval_sampler = SequentialSampler(eval_dataset)
     eval_dataloader = DataLoader(
@@ -444,7 +455,6 @@ def evaluate(
     gnn_model.eval()
     logits = []
     y_trues = []
-    best_threshold = 0.5
     for batch in tqdm(eval_dataloader, desc="evaluate eval"):
         (inputs_ids, labels, index) = [x.to(args.device) for x in batch]
 
@@ -465,27 +475,19 @@ def evaluate(
             eval_loss += lm_loss.mean().item()
             logits.append(logit.cpu().numpy())
             y_trues.append(labels.cpu().numpy())
-
-            if printout_sample:
-                test_logits = np.concatenate(logits, 0)
-                test_y_trues = np.concatenate(y_trues, 0)
-                test_y_preds = test_logits[:, 1] > best_threshold
-                print(test_y_trues)
-                print(test_y_preds)
-                if test_y_preds.any() == test_y_trues.any() and test_y_trues.any():
-                    print("Correct prediction")
-                    for input in inputs_ids:
-                        tokens = tokenizer.decode(input)
-                    print(tokens)
-
         nb_eval_steps += 1
     logger.info("%d items missing", num_missing)
 
     # calculate scores
     logits = np.concatenate(logits, 0)
     y_trues = np.concatenate(y_trues, 0)
-
     y_preds = logits[:, 1] > best_threshold
+    print("classification_report")
+    classification = classification_report(y_trues, y_preds, output_dict=True)
+    macro_avg = classification["macro avg"]
+    weighted_avg = classification["weighted avg"]
+    print(macro_avg)
+    print(weighted_avg)
     recall = recall_score(y_trues, y_preds)
     precision = precision_score(y_trues, y_preds)
     f1 = f1_score(y_trues, y_preds)
@@ -508,7 +510,6 @@ def test(
     args,
     hf_model,
     gnn_model,
-    tokenizer,
     test_dataset,
     flowgnn_dataset,
     output_dir,
@@ -615,24 +616,23 @@ def test(
     y_trues = np.concatenate(y_trues, 0)
     y_preds = logits[:, 1] > best_threshold
     print("classification_report")
-    print(classification_report(y_trues, y_preds))
+    classification = classification_report(y_trues, y_preds, output_dict=True)
+    macro_avg = classification["macro avg"]
+    weighted_avg = classification["weighted avg"]
+    print(macro_avg)
+    print(weighted_avg)
     print("confusion_matrix")
     print(confusion_matrix(y_trues, y_preds))
     acc = accuracy_score(y_trues, y_preds)
-    recall = recall_score(y_trues, y_preds)
-    precision = precision_score(y_trues, y_preds)
-    f1 = f1_score(y_trues, y_preds)
     result = {
         "test_accuracy": float(acc),
-        "test_recall": float(recall),
-        "test_precision": float(precision),
-        "test_f1": float(f1),
         "test_threshold": best_threshold,
     }
 
     logger.info("***** Test results *****")
     for key in sorted(result.keys()):
         logger.info("  %s = %s", key, str(round(result[key], 4)))
+    return result
 
 
 def main():
@@ -768,6 +768,9 @@ def main():
     )
     parser.add_argument(
         "--max_grad_norm", default=1.0, type=float, help="Max gradient norm."
+    )
+    parser.add_argument(
+        "--best_threshold", default=0.5, type=float, help="Eval threshold."
     )
     parser.add_argument(
         "--max_steps",
@@ -948,10 +951,6 @@ def main():
             num_output_layers,
             label_style=label_style,
             concat_all_absdf=concat_all_absdf,
-            # undersample_node_on_loss_factor=None,
-            # test_every=False,
-            # tune_nni=False,
-            # positive_weight=None,
             encoder_mode=True,
         )
         logger.info("FlowGNN output dim: %d", flowgnn_model.out_dim)
@@ -960,6 +959,7 @@ def main():
     gnn_model = GNNModel(flowgnn_model, llm_model.config, args)
 
     # print number of params
+
     def count_params(model):
         if model is None:
             return 0
@@ -975,6 +975,8 @@ def main():
         print("flowgnn_encoder:", llm_model.flowgnn_encoder)
 
     gnn_model.to(args.device)
+    if not args.no_flowgnn:
+        gnn_model = torch.nn.DataParallel(gnn_model)
 
     # Training
     if args.do_train:
@@ -997,7 +999,6 @@ def main():
             args,
             llm_model,
             gnn_model,
-            tokenizer,
             test_dataset,
             flowgnn_dataset,
             output_dir,

@@ -3,8 +3,8 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 from transformers import (
     RobertaForSequenceClassification,
-    AutoModelForSequenceClassification,
     LlamaForSequenceClassification,
+    LlamaForCausalLM,
 )
 import gc  # garbage collect library
 
