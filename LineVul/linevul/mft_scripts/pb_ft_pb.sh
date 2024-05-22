@@ -22,11 +22,11 @@ python3 linevul_main.py \
   --eval_data_file=../data/$dataset/val.csv \
   --test_data_file=../data/$dataset/test.csv \
   --epochs 3 \
-  --block_size 2048 \
-  --train_batch_size 6 \
-  --eval_batch_size 6 \
+  --block_size 1024 \
+  --train_batch_size 3 \
+  --eval_batch_size 3 \
   --learning_rate 1e-6 \
-  --best_threshold 0.3 \
+  --best_threshold 0.4 \
   --max_grad_norm 1.0 \
   --evaluate_during_training \
   --use_finetuned_model \

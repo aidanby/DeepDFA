@@ -33,3 +33,5 @@ dependencies:
     - jsonargparse[signatures]
     - fastparquet
     - gdown
+    - redis==2.10.6
+    - peft==0.7.0

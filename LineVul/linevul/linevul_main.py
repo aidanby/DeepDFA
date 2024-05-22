@@ -13,6 +13,7 @@ from tqdm import tqdm
 from linevul_model import LLMModel, GNNModel
 import pandas as pd
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import (
     AdamW,
     get_cosine_schedule_with_warmup,
@@ -47,7 +48,7 @@ logger = logging.getLogger(__name__)
 # Testing uses
 eval_steps = 4
 test_sample_size = None
-test_sample_size = 500
+test_sample_size = 5000
 printout_sample = False
 eval_first = True
 initial_threshold = 0.55
@@ -484,9 +485,7 @@ def evaluate(
     y_preds = logits[:, 1] > best_threshold
     print("classification_report")
     classification = classification_report(y_trues, y_preds, output_dict=True)
-    macro_avg = classification["macro avg"]
     weighted_avg = classification["weighted avg"]
-    print(macro_avg)
     print(weighted_avg)
     recall = recall_score(y_trues, y_preds)
     precision = precision_score(y_trues, y_preds)
@@ -498,10 +497,6 @@ def evaluate(
         "eval_threshold": best_threshold,
         "eval_loss": float(eval_loss / nb_eval_steps),
     }
-
-    logger.info("***** Eval results *****")
-    for key in sorted(result.keys()):
-        logger.info("  %s = %s", key, str(round(result[key], 4)))
 
     return result
 
@@ -617,9 +612,7 @@ def test(
     y_preds = logits[:, 1] > best_threshold
     print("classification_report")
     classification = classification_report(y_trues, y_preds, output_dict=True)
-    macro_avg = classification["macro avg"]
     weighted_avg = classification["weighted avg"]
-    print(macro_avg)
     print(weighted_avg)
     print("confusion_matrix")
     print(confusion_matrix(y_trues, y_preds))
@@ -628,10 +621,6 @@ def test(
         "test_accuracy": float(acc),
         "test_threshold": best_threshold,
     }
-
-    logger.info("***** Test results *****")
-    for key in sorted(result.keys()):
-        logger.info("  %s = %s", key, str(round(result[key], 4)))
     return result
 
 
@@ -851,6 +840,9 @@ def main():
     args.n_gpu = torch.cuda.device_count()
     args.device = device
 
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "29500"
+
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -865,6 +857,38 @@ def main():
 
     # Set seed
     set_seed(args)
+
+    # load all graphs
+    if args.really_no_flowgnn:
+        flowgnn_datamodule = None
+        flowgnn_dataset = None
+    else:
+        feat = "_ABS_DATAFLOW_datatype_all_limitall_1000_limitsubkeys_1000"
+        gtype = "cfg"
+        label_style = "graph"
+        dsname = args.dsname
+        concat_all_absdf = not args.no_concat
+        flowgnn_datamodule = BigVulDatasetLineVDDataModule(
+            feat,
+            gtype,
+            label_style,
+            dsname,
+            undersample=None,
+            oversample=None,
+            sample=-1,
+            sample_mode=args.sample,
+            train_workers=1,
+            val_workers=0,
+            test_workers=0,
+            split="fixed",
+            batch_size=256,
+            seed=args.seed,
+            concat_all_absdf=concat_all_absdf,
+            train_includes_all=True,
+            load_features=not args.no_flowgnn,
+        )
+        flowgnn_dataset = flowgnn_datamodule.train
+        logger.info("FlowGNN dataset:\n%s", flowgnn_datamodule.train.df)
 
     # Load LLM
     tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
@@ -900,40 +924,6 @@ def main():
     llm_model.config.num_labels = 1
     llm_model.config.num_attention_heads = args.num_attention_heads
     llm_model.config.pad_token_id = llm_model.model.config.eos_token_id
-
-    # load all graphs
-    if args.really_no_flowgnn:
-        flowgnn_datamodule = None
-        flowgnn_dataset = None
-    else:
-        feat = "_ABS_DATAFLOW_datatype_all_limitall_1000_limitsubkeys_1000"
-        gtype = "cfg"
-        label_style = "graph"
-        dsname = args.dsname
-        concat_all_absdf = not args.no_concat
-        flowgnn_datamodule = BigVulDatasetLineVDDataModule(
-            feat,
-            gtype,
-            label_style,
-            dsname,
-            undersample=None,
-            oversample=None,
-            sample=-1,
-            sample_mode=args.sample,
-            train_workers=1,
-            val_workers=0,
-            test_workers=0,
-            split="fixed",
-            batch_size=256,
-            seed=args.seed,
-            concat_all_absdf=concat_all_absdf,
-            # use_weighted_loss=False,
-            # use_random_weighted_sampler=False,
-            train_includes_all=True,
-            load_features=not args.no_flowgnn,
-        )
-        flowgnn_dataset = flowgnn_datamodule.train
-        logger.info("FlowGNN dataset:\n%s", flowgnn_datamodule.train.df)
 
     # Load model
     if args.really_no_flowgnn:
@@ -975,8 +965,10 @@ def main():
         print("flowgnn_encoder:", llm_model.flowgnn_encoder)
 
     gnn_model.to(args.device)
-    if not args.no_flowgnn:
-        gnn_model = torch.nn.DataParallel(gnn_model)
+    if args.no_flowgnn:
+        print(f"Distributed training with {args.n_gpu} GPUs")
+        gnn_model = DDP(gnn_model)
+        gnn_model.cuda()
 
     # Training
     if args.do_train:
