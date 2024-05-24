@@ -2,7 +2,6 @@ from __future__ import absolute_import, division, print_function
 import argparse
 import logging
 import os
-import random
 import re
 import json
 import numpy as np
@@ -13,9 +12,7 @@ from tqdm import tqdm
 from linevul_model import LLMModel, GNNModel
 import pandas as pd
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import (
-    AdamW,
     get_cosine_schedule_with_warmup,
     AutoTokenizer,
     AutoModelForSequenceClassification,
@@ -26,21 +23,12 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 
 # metrics
-from sklearn.metrics import (
-    accuracy_score,
-    recall_score,
-    precision_score,
-    f1_score,
-    classification_report,
-    confusion_matrix,
-)
+from sklearn.metrics import classification_report
 
 deepdfa = path.abspath(path.join(__file__, "../../../DDFA/"))
 sys.path.append(deepdfa)
-from code_gnn.models.flow_gnn.ggnn import FlowGNNGGNNModule
-from sastvd.linevd.datamodule import BigVulDatasetLineVDDataModule
+
 from hf_inference import PeftInference
-import dgl
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
 
 logger = logging.getLogger(__name__)
@@ -48,10 +36,8 @@ logger = logging.getLogger(__name__)
 # Testing uses
 eval_steps = 4
 test_sample_size = None
-test_sample_size = 5000
-printout_sample = False
+# test_sample_size = 5000
 eval_first = True
-initial_threshold = 0.55
 
 
 def write_tensorboard(summary_writer: SummaryWriter, log_dict: dict, completed_steps):
@@ -222,15 +208,6 @@ def convert_examples_to_features(func, label, tokenizer, args, i):
     return InputFeatures(source_tokens, source_ids, label, i)
 
 
-def set_seed(args):
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if args.n_gpu > 0:
-        torch.cuda.manual_seed_all(args.seed)
-    dgl.seed(args.seed)
-
-
 def train(
     args, train_dataset, hf_model, gnn_model, eval_dataset, flowgnn_dataset, tokenizer
 ):
@@ -300,17 +277,6 @@ def train(
     # Evaluate results before any training
     if eval_first:
         logger.info("***** First eval *****")
-        # test_dataset = TextDataset(tokenizer, args, file_type="test", return_index=True)
-        # results = test(
-        #     args,
-        #     hf_model,
-        #     gnn_model,
-        #     test_dataset,
-        #     flowgnn_dataset,
-        #     output_dir,
-        #     initial_threshold,
-        # )
-        # write_tensorboard(summary_writer, results, global_step)
 
         results = evaluate(
             args,
@@ -318,7 +284,7 @@ def train(
             gnn_model,
             eval_dataset,
             flowgnn_dataset,
-            initial_threshold,
+            args.best_threshold,
         )
         write_tensorboard(summary_writer, results, global_step)
 
@@ -404,21 +370,6 @@ def train(
 
                     write_tensorboard(summary_writer, results, global_step + step)
 
-                    # Save model checkpoint
-                    if results["eval_f1"] > best_f1 or batch_idx == 0:
-                        best_f1 = results["eval_f1"]
-                        logger.info("  " + "*" * 20)
-                        logger.info("  Best f1:%s", round(best_f1, 4))
-                        logger.info("  " + "*" * 20)
-
-                        model_to_save = (
-                            gnn_model.module
-                            if hasattr(gnn_model, "module")
-                            else gnn_model
-                        )
-                        output_dir = process_checkpoint_dir(args, global_step + step)
-                        torch.save(model_to_save.state_dict(), output_dir)
-                        logger.info("Saving model checkpoint to %s", output_dir)
         logger.info("%d items missing", num_missing)
         model_to_save = gnn_model.module if hasattr(gnn_model, "module") else gnn_model
         output_dir = process_checkpoint_dir(args, "final")
@@ -477,24 +428,16 @@ def evaluate(
             logits.append(logit.cpu().numpy())
             y_trues.append(labels.cpu().numpy())
         nb_eval_steps += 1
-    logger.info("%d items missing", num_missing)
 
     # calculate scores
     logits = np.concatenate(logits, 0)
     y_trues = np.concatenate(y_trues, 0)
     y_preds = logits[:, 1] > best_threshold
-    print("classification_report")
+    logger.info("classification_report")
     classification = classification_report(y_trues, y_preds, output_dict=True)
-    weighted_avg = classification["weighted avg"]
-    print(weighted_avg)
-    recall = recall_score(y_trues, y_preds)
-    precision = precision_score(y_trues, y_preds)
-    f1 = f1_score(y_trues, y_preds)
+    avg = classification["macro avg"]
+    logger.info(avg)
     result = {
-        "eval_recall": float(recall),
-        "eval_precision": float(precision),
-        "eval_f1": float(f1),
-        "eval_threshold": best_threshold,
         "eval_loss": float(eval_loss / nb_eval_steps),
     }
 
@@ -610,18 +553,10 @@ def test(
     logits = np.concatenate(logits, 0)
     y_trues = np.concatenate(y_trues, 0)
     y_preds = logits[:, 1] > best_threshold
-    print("classification_report")
+    logger.info("classification_report")
     classification = classification_report(y_trues, y_preds, output_dict=True)
-    weighted_avg = classification["weighted avg"]
-    print(weighted_avg)
-    print("confusion_matrix")
-    print(confusion_matrix(y_trues, y_preds))
-    acc = accuracy_score(y_trues, y_preds)
-    result = {
-        "test_accuracy": float(acc),
-        "test_threshold": best_threshold,
-    }
-    return result
+    avg = classification["macro avg"]
+    logger.info(avg)
 
 
 def main():
@@ -840,9 +775,6 @@ def main():
     args.n_gpu = torch.cuda.device_count()
     args.device = device
 
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "29500"
-
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -855,10 +787,7 @@ def main():
         args.n_gpu,
     )
 
-    # Set seed
-    set_seed(args)
-
-    # load all graphs
+    # Load all graphs if using DeepDFA
     if args.really_no_flowgnn:
         flowgnn_datamodule = None
         flowgnn_dataset = None
@@ -868,6 +797,8 @@ def main():
         label_style = "graph"
         dsname = args.dsname
         concat_all_absdf = not args.no_concat
+        from sastvd.linevd.datamodule import BigVulDatasetLineVDDataModule
+
         flowgnn_datamodule = BigVulDatasetLineVDDataModule(
             feat,
             gtype,
@@ -882,7 +813,7 @@ def main():
             test_workers=0,
             split="fixed",
             batch_size=256,
-            seed=args.seed,
+            seed=1,
             concat_all_absdf=concat_all_absdf,
             train_includes_all=True,
             load_features=not args.no_flowgnn,
@@ -929,6 +860,8 @@ def main():
     if args.really_no_flowgnn:
         flowgnn_model = None
     else:
+        from code_gnn.models.flow_gnn.ggnn import FlowGNNGGNNModule
+
         input_dim = flowgnn_datamodule.input_dim
         hidden_dim = 32
         n_steps = 5
@@ -967,8 +900,7 @@ def main():
     gnn_model.to(args.device)
     if args.no_flowgnn:
         print(f"Distributed training with {args.n_gpu} GPUs")
-        gnn_model = DDP(gnn_model)
-        gnn_model.cuda()
+        gnn_model = torch.nn.DataParallel(gnn_model)
 
     # Training
     if args.do_train:

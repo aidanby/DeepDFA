@@ -14,7 +14,6 @@ python3 linevul_main.py \
   --tb_dir=../tensorboard/ \
   --model_type=llama \
   --model_name_or_path=codellama/CodeLlama-13b-hf \
-  --finetuned_path=../finetune_checkpoints/checkpoints_pb_codellama/checkpoint \
   --output_dir=./saved_models \
   --do_train \
   --do_test \
@@ -30,4 +29,4 @@ python3 linevul_main.py \
   --evaluate_during_training \
   --no_flowgnn \
   --really_no_flowgnn \
-  --seed $seed $@ 2>&1 | tee "train_${dataset}_${seed}.log"
+  --seed $seed $@ 2>&1 | tee "train_${dataset}_pretrained.log"

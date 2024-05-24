@@ -6,7 +6,6 @@ from transformers import (
     LlamaForSequenceClassification,
     LlamaForCausalLM,
 )
-import gc  # garbage collect library
 
 
 class ClassificationHead(nn.Module):
