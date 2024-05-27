@@ -9,11 +9,12 @@ dataset=$2
 shift
 shift
 
-python3 linevul_main.py \
-  --model_name=pretrained-bigvul \
+python3 train.py \
+  --model_name=finetuned-bigvul-test \
   --tb_dir=../tensorboard/ \
+  --finetuned_path=../finetune_checkpoints/checkpoints_bigvul_expl/checkpoint \
   --model_type=llama \
-  --model_name_or_path=codellama/CodeLlama-13b-hf \
+  --model_name_or_path=codellama/CodeLlama-7b-hf \
   --output_dir=./saved_models \
   --do_train \
   --do_test \
@@ -21,12 +22,10 @@ python3 linevul_main.py \
   --eval_data_file=../data/$dataset/val.csv \
   --test_data_file=../data/$dataset/test.csv \
   --epochs 5 \
-  --block_size 512 \
+  --block_size 256 \
   --train_batch_size 4 \
   --eval_batch_size 4 \
-  --learning_rate 5e-5 \
+  --learning_rate 1e-4 \
   --max_grad_norm 1.0 \
   --evaluate_during_training \
-  --no_flowgnn \
-  --really_no_flowgnn \
-  --seed $seed $@ 2>&1 | tee "train_${dataset}_pretrained.log"
+  --seed $seed $@ 2>&1 | tee "train_${dataset}_expl.log"

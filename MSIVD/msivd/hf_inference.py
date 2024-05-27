@@ -93,8 +93,6 @@ def load_model_tokenizer(
     base_model = AutoModelForCausalLM.from_pretrained(
         path,
         config=config,
-        # load_in_8bit=(quantization == "8bit"),
-        # load_in_4bit=(quantization == "4bit"),
         quantization_config=bnb_config,
         device_map="auto",
         torch_dtype=torch_dtype,

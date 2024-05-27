@@ -9,7 +9,7 @@ import torch
 import sys
 import os.path as path
 from tqdm import tqdm
-from linevul_model import LLMModel, GNNModel
+from DeepDFA.MSIVD.msivd.model import LLMModel, GNNModel
 import pandas as pd
 from torch.utils.data import DataLoader, Dataset, SequentialSampler, RandomSampler
 from transformers import (
@@ -34,10 +34,10 @@ from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
 logger = logging.getLogger(__name__)
 
 # Testing uses
-eval_steps = 4
+first_eval_steps = 5
+eval_steps = 2
 test_sample_size = None
-# test_sample_size = 5000
-eval_first = True
+test_sample_size = 5000
 
 
 def write_tensorboard(summary_writer: SummaryWriter, log_dict: dict, completed_steps):
@@ -181,12 +181,12 @@ def convert_examples_to_features(func, label, tokenizer, args, i):
     if args.use_word_level_tokenizer:
         encoded = tokenizer.encode(func)
         encoded = encoded.ids
-        if len(encoded) > 510:
-            encoded = encoded[:510]
+        if len(encoded) > args.block_size:
+            encoded = encoded[: args.block_size]
         encoded.insert(0, 0)
         encoded.append(2)
-        if len(encoded) < 512:
-            padding = 512 - len(encoded)
+        if len(encoded) < args.block_size:
+            padding = args.block_size - len(encoded)
             for _ in range(padding):
                 encoded.append(1)
         source_ids = encoded
@@ -235,6 +235,7 @@ def train(
     args.max_steps = args.epochs * len(train_dataloader)
     # How many steps before eval
     args.save_steps = int(len(train_dataloader) / eval_steps)
+    first_save_step = int(len(train_dataloader) / first_eval_steps)
     args.warmup_steps = args.max_steps // 50
 
     # Prepare optimizer and schedule (linear warmup and decay)
@@ -274,8 +275,12 @@ def train(
         args.train_batch_size * args.gradient_accumulation_steps,
     )
 
-    # Evaluate results before any training
-    if eval_first:
+    # Evaluate results before any training for finetuned precisebug models
+    if (
+        args.eval_first
+        and "pretrained" not in args.model_name
+        and "bigvul" not in args.model_name
+    ):
         logger.info("***** First eval *****")
 
         results = evaluate(
@@ -296,9 +301,9 @@ def train(
     logger.info("  Total optimization steps = %d", args.max_steps)
 
     tr_loss, logging_loss, avg_loss, tr_nb, tr_num, train_loss = 0.0, 0.0, 0.0, 0, 0, 0
-    best_f1 = 0
     gnn_model.zero_grad()
     num_missing = 0
+    first_eval = True
     for batch_idx in range(args.epochs):
         bar = tqdm(train_dataloader, total=len(train_dataloader))
         tr_num = 0
@@ -358,7 +363,7 @@ def train(
                     np.exp((tr_loss - logging_loss) / (global_step - tr_nb)), 4
                 )
 
-                if global_step % args.save_steps == 0:
+                if first_eval and (global_step % first_save_step == 0):
                     results = evaluate(
                         args,
                         hf_model,
@@ -367,7 +372,17 @@ def train(
                         flowgnn_dataset,
                         args.best_threshold,
                     )
-
+                    write_tensorboard(summary_writer, results, global_step + step)
+                    first_eval = False
+                elif global_step % args.save_steps == 0:
+                    results = evaluate(
+                        args,
+                        hf_model,
+                        gnn_model,
+                        eval_dataset,
+                        flowgnn_dataset,
+                        args.best_threshold,
+                    )
                     write_tensorboard(summary_writer, results, global_step + step)
 
         logger.info("%d items missing", num_missing)
@@ -428,15 +443,20 @@ def evaluate(
             logits.append(logit.cpu().numpy())
             y_trues.append(labels.cpu().numpy())
         nb_eval_steps += 1
-
     # calculate scores
     logits = np.concatenate(logits, 0)
     y_trues = np.concatenate(y_trues, 0)
     y_preds = logits[:, 1] > best_threshold
     logger.info("classification_report")
     classification = classification_report(y_trues, y_preds, output_dict=True)
-    avg = classification["macro avg"]
-    logger.info(avg)
+    weighted = classification["weighted avg"]
+    macro = classification["macro avg"]
+    if "bigvul" in args.model_name:
+        # Unbalanced label dataset use macro avg for final score
+        logger.info(macro)
+    else:
+        # Balanced label dataset use weighted avg for final score
+        logger.info(weighted)
     result = {
         "eval_loss": float(eval_loss / nb_eval_steps),
     }
@@ -462,7 +482,7 @@ def test(
         num_workers=0,
     )
 
-    # Eval!
+    # Test!
     logger.info("***** Running Test *****")
     logger.info("  Num examples = %d", len(test_dataset))
     logger.info("  Batch size = %d", args.eval_batch_size)
@@ -555,8 +575,14 @@ def test(
     y_preds = logits[:, 1] > best_threshold
     logger.info("classification_report")
     classification = classification_report(y_trues, y_preds, output_dict=True)
-    avg = classification["macro avg"]
-    logger.info(avg)
+    weighted = classification["weighted avg"]
+    macro = classification["macro avg"]
+    if "bigvul" in args.model_name:
+        # Unbalanced label dataset use macro avg for final score
+        logger.info(macro)
+    else:
+        # Balanced label dataset use weighted avg for final score
+        logger.info(weighted)
 
 
 def main():
@@ -641,6 +667,12 @@ def main():
         "--load_checkpoint",
         action="store_true",
         help="Whether to load checkpoint for training.",
+    )
+
+    parser.add_argument(
+        "--eval_first",
+        action="store_true",
+        help="Whether or not to eval before any training",
     )
 
     parser.add_argument(
@@ -822,7 +854,7 @@ def main():
         logger.info("FlowGNN dataset:\n%s", flowgnn_datamodule.train.df)
 
     # Load LLM
-    tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
     tokenizer.padding_side = "left"
 
     train_dataset = TextDataset(tokenizer, args, file_type="train", return_index=True)
@@ -845,10 +877,11 @@ def main():
         )
         llm_model = AutoModelForSequenceClassification.from_pretrained(
             args.model_name_or_path,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.float16,
             quantization_config=bnb_config,
             output_hidden_states=True,
             device_map="balanced",
+            trust_remote_code=True,
         )
 
     # Set manual config options

@@ -8,3 +8,6 @@ __pycache__/
 *.zip
 LineVul/finetune_checkpoints/
 **tensorboard**
+**saved_models**
+**finetune_checkpoints**
+MSIVD/msivd/ifa_records
